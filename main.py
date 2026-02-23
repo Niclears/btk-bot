@@ -163,20 +163,16 @@ def get_schedule_from_site(group_name):
     }
     
     all_schedule_items = []
-    page = 1
-    max_pages = 10  # Ограничим, чтобы не зависнуть
+    page = 0
+    limit = 20  # Сколько записей на странице
     
     try:
-        while page <= max_pages:
-            # Добавляем параметр страницы к URL
-            if page == 1:
-                url = base_url
-            else:
-                # На сайте используется пагинация через start
-                start = (page - 1) * 20
-                url = f"{base_url}?start={start}"
+        while True:
+            # Формируем URL с параметрами пагинации
+            # На сайте используется limitstart
+            url = f"{base_url}?limitstart={page * limit}"
             
-            print(f"🔄 Загружаю страницу {page}...")
+            print(f"🔄 Загружаю страницу {page + 1}...")
             response = requests.get(url, headers=headers, timeout=15)
             response.encoding = 'utf-8'
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -184,16 +180,24 @@ def get_schedule_from_site(group_name):
             # Ищем таблицу
             table = soup.find('table')
             if not table:
-                print(f"❌ На странице {page} нет таблицы")
+                print(f"❌ На странице {page + 1} нет таблицы")
                 break
             
             # Парсим строки таблицы
             rows = table.find_all('tr')[1:]  # пропускаем заголовок
-            print(f"📊 Страница {page}: найдено {len(rows)} строк")
+            print(f"📊 Страница {page + 1}: найдено {len(rows)} строк")
             
             if not rows:
-                print(f"✅ Достигнут конец данных на странице {page}")
+                print(f"✅ Достигнут конец данных")
                 break
+            
+            # Ищем информацию о пагинации
+            pagination = soup.find('div', class_='pagination')
+            if pagination:
+                # Пробуем найти общее количество записей
+                counter = pagination.find('div', class_='counter')
+                if counter:
+                    print(f"📄 Информация о пагинации: {counter.text}")
             
             page_items = 0
             for row in rows:
@@ -216,15 +220,24 @@ def get_schedule_from_site(group_name):
                         })
                         page_items += 1
             
-            print(f"✅ Страница {page}: найдено {page_items} занятий для группы {group_name}")
+            print(f"✅ Страница {page + 1}: найдено {page_items} занятий для группы {group_name}")
             
             # Проверяем, есть ли следующая страница
-            # Если на странице меньше 20 строк, значит это последняя страница
-            if len(rows) < 20:
+            # Ищем ссылку "next" или "далее"
+            next_link = soup.find('a', title='Вперед')
+            if not next_link:
+                next_link = soup.find('a', class_='next')
+            if not next_link:
+                next_link = soup.find('a', text=lambda t: t and ('далее' in t.lower() or 'next' in t.lower() or '>' in t))
+            
+            if not next_link:
                 print("✅ Это последняя страница")
                 break
             
             page += 1
+            
+            # Небольшая задержка, чтобы не нагружать сайт
+            time.sleep(1)
             
         print(f"🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
         return all_schedule_items
@@ -237,7 +250,6 @@ def get_schedule_from_site(group_name):
         import traceback
         traceback.print_exc()
         return []
-
 def get_lesson_time(lesson_num, day_of_week):
     """
     Возвращает время начала и конца пары по номеру и дню недели
