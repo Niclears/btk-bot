@@ -2,6 +2,8 @@ import os
 import sys
 import subprocess
 from datetime import datetime, timedelta
+import time
+import sqlite3
 
 # Сначала устанавливаем библиотеки
 print("🔄 Проверка и установка библиотек...")
@@ -22,7 +24,6 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
-import sqlite3
 
 print("✅ Все библиотеки загружены")
 
@@ -151,9 +152,9 @@ def get_bell_schedule(day_of_week):
 
     return text
 
-# ---------- Парсинг расписания занятий ----------
+# ---------- Парсинг расписания занятий (ВСЕ СТРАНИЦЫ) ----------
 def get_schedule_from_site(group_name):
-    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
+    base_url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -161,70 +162,75 @@ def get_schedule_from_site(group_name):
         'Connection': 'keep-alive',
     }
     
+    all_schedule_items = []
+    page = 1
+    max_pages = 10  # Ограничим, чтобы не зависнуть
+    
     try:
-        print(f"🔄 Пытаюсь подключиться к сайту: {url}")
-        response = requests.get(url, headers=headers, timeout=15)
-        print(f"✅ Статус ответа: {response.status_code}")
+        while page <= max_pages:
+            # Добавляем параметр страницы к URL
+            if page == 1:
+                url = base_url
+            else:
+                # На сайте используется пагинация через start
+                start = (page - 1) * 20
+                url = f"{base_url}?start={start}"
+            
+            print(f"🔄 Загружаю страницу {page}...")
+            response = requests.get(url, headers=headers, timeout=15)
+            response.encoding = 'utf-8'
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Ищем таблицу
+            table = soup.find('table')
+            if not table:
+                print(f"❌ На странице {page} нет таблицы")
+                break
+            
+            # Парсим строки таблицы
+            rows = table.find_all('tr')[1:]  # пропускаем заголовок
+            print(f"📊 Страница {page}: найдено {len(rows)} строк")
+            
+            if not rows:
+                print(f"✅ Достигнут конец данных на странице {page}")
+                break
+            
+            page_items = 0
+            for row in rows:
+                cells = row.find_all('td')
+                if len(cells) >= 7:
+                    date = cells[0].text.strip()
+                    group = cells[1].text.strip()
+                    lesson_num = cells[2].text.strip()
+                    subject = cells[3].text.strip()
+                    teacher = cells[4].text.strip()
+                    room = cells[5].text.strip()
+                    
+                    if group == group_name:
+                        all_schedule_items.append({
+                            'date': date,
+                            'lesson_num': lesson_num,
+                            'subject': subject,
+                            'teacher': teacher,
+                            'room': room
+                        })
+                        page_items += 1
+            
+            print(f"✅ Страница {page}: найдено {page_items} занятий для группы {group_name}")
+            
+            # Проверяем, есть ли следующая страница
+            # Если на странице меньше 20 строк, значит это последняя страница
+            if len(rows) < 20:
+                print("✅ Это последняя страница")
+                break
+            
+            page += 1
+            
+        print(f"🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
+        return all_schedule_items
         
-        if response.status_code != 200:
-            print(f"❌ Сайт вернул ошибку: {response.status_code}")
-            return []
-        
-        response.encoding = 'utf-8'
-        print(f"📄 Размер страницы: {len(response.text)} символов")
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Ищем таблицу разными способами
-        table = None
-        possible_tables = soup.find_all('table')
-        print(f"🔍 Найдено таблиц на странице: {len(possible_tables)}")
-        
-        if possible_tables:
-            # Берем первую таблицу (обычно она и есть расписание)
-            table = possible_tables[0]
-            print("✅ Таблица найдена")
-        else:
-            print("❌ Таблицы не найдены")
-            # Сохраним часть страницы для отладки
-            print(f"Первые 500 символов страницы: {soup.prettify()[:500]}")
-            return []
-        
-        schedule_items = []
-        rows = table.find_all('tr')[1:]  # пропускаем заголовок
-        print(f"📊 Найдено строк в таблице: {len(rows)}")
-        
-        for row_num, row in enumerate(rows[:10]):  # первые 10 строк для отладки
-            cells = row.find_all('td')
-            print(f"Строка {row_num+1}, ячеек: {len(cells)}")
-            if len(cells) >= 7:
-                date = cells[0].text.strip()
-                group = cells[1].text.strip()
-                lesson_num = cells[2].text.strip()
-                subject = cells[3].text.strip()
-                teacher = cells[4].text.strip()
-                room = cells[5].text.strip()
-                
-                print(f"Найдено: {date}, {group}, {lesson_num}, {subject}")
-                
-                if group == group_name:
-                    schedule_items.append({
-                        'date': date,
-                        'lesson_num': lesson_num,
-                        'subject': subject,
-                        'teacher': teacher,
-                        'room': room
-                    })
-        
-        print(f"✅ Найдено {len(schedule_items)} занятий для группы {group_name}")
-        return schedule_items
-        
-    except requests.exceptions.ConnectionError as e:
-        print(f"❌ Ошибка подключения: {e}")
-        print("🔧 Возможно, сайт колледжа недоступен из Render")
-        return []
-    except requests.exceptions.Timeout as e:
-        print(f"❌ Таймаут: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Ошибка запроса: {e}")
         return []
     except Exception as e:
         print(f"❌ Неизвестная ошибка: {e}")
@@ -290,7 +296,7 @@ def format_schedule_with_day(schedule, group_name, target_day, period_name):
     """Форматирует расписание с учетом конкретного дня недели для времени пар"""
     if not schedule:
         return f"😕 Нет расписания для группы {group_name}"
-
+    
     # Словарь для перевода дня недели
     days_ru = {
         0: "ПОНЕДЕЛЬНИК",
@@ -301,39 +307,47 @@ def format_schedule_with_day(schedule, group_name, target_day, period_name):
         5: "СУББОТА",
         6: "ВОСКРЕСЕНЬЕ"
     }
-
+    
     text = f"📚 <b>РАСПИСАНИЕ {period_name}</b>\n"
     text += f"👥 <b>Группа {group_name}</b>\n"
     if period_name in ["СЕГОДНЯ", "ЗАВТРА"]:
         text += f"📅 <b>{days_ru[target_day]}</b>\n"
     text += "══════════════════════\n"
-
-    current_date = ""
-    count = 0
-
+    
+    # Группируем по датам
+    dates = {}
     for item in schedule:
-        count += 1
-        if item['date'] != current_date:
-            current_date = item['date']
-            text += f"\n📅 <b>{current_date}</b>\n"
-            text += "──────────────────\n"
-
-        text += f"<b>{item['lesson_num']} пара:</b>\n"
-        text += f"📖 <b>{item['subject']}</b>\n"
-        text += f"👨‍🏫 {item['teacher']}\n"
-        text += f"🚪 Кабинет: {item['room']}\n"
-
-        # Добавляем время пары с учетом дня недели
-        if item['lesson_num'].isdigit():
-            lesson_time = get_lesson_time(int(item['lesson_num']), target_day)
-            if lesson_time:
-                text += f"⏱️ {lesson_time}\n"
-
-        text += "\n"
-
+        if item['date'] not in dates:
+            dates[item['date']] = []
+        dates[item['date']].append(item)
+    
+    # Сортируем даты
+    total_count = 0
+    
+    for date in sorted(dates.keys()):
+        text += f"\n📅 <b>{date}</b>\n"
+        text += "──────────────────\n"
+        
+        # Сортируем по номеру пары
+        sorted_items = sorted(dates[date], key=lambda x: int(x['lesson_num']) if x['lesson_num'].isdigit() else 0)
+        
+        for item in sorted_items:
+            total_count += 1
+            text += f"<b>{item['lesson_num']} пара:</b>\n"
+            text += f"📖 <b>{item['subject']}</b>\n"
+            text += f"👨‍🏫 {item['teacher']}\n"
+            text += f"🚪 Кабинет: {item['room']}\n"
+            
+            if item['lesson_num'].isdigit():
+                lesson_time = get_lesson_time(int(item['lesson_num']), target_day)
+                if lesson_time:
+                    text += f"⏱️ {lesson_time}\n"
+            
+            text += "\n"
+    
     text += "══════════════════════\n"
-    text += f"📊 <b>Всего пар:</b> {count}"
-
+    text += f"📊 <b>Всего пар:</b> {total_count}"
+    
     return text
 
 # ---------- Команды бота ----------
@@ -431,11 +445,18 @@ def show_help(message):
         "• Проверь, сохранена ли группа\n"
         "• Попробуй нажать /start\n"
         "• Напиши позже, если сайт колледжа недоступен\n\n"
-        "🛠️ <b>Разработчик:</b> @Михась"
+        "🛠️ <b>Разработчик:</b> @твой_username"
     )
     bot.send_message(message.chat.id, help_text, parse_mode='HTML')
 
 def show_schedule(message, period):
+    # Устанавливаем часовой пояс для корректной даты
+    os.environ['TZ'] = 'Europe/Minsk'
+    try:
+        time.tzset()  # Перезагружаем настройки времени (для Unix)
+    except:
+        pass  # Для Windows игнорируем
+    
     # Получаем группу пользователя
     try:
         conn = sqlite3.connect('schedule.db')
@@ -461,86 +482,76 @@ def show_schedule(message, period):
     if schedule:
         # Определяем день недели для показа времени пар
         today = datetime.now().weekday()
-
+        
         if period == 'today':
             target_day = today
             period_name = "СЕГОДНЯ"
-            # Получаем сегодняшнюю дату в разных форматах
+            # Получаем сегодняшнюю дату
             today_date = datetime.now()
             date_formats = [
-                today_date.strftime("%d-%b").lower(),           # 23-фев
-                today_date.strftime("%-d-%b").lower(),          # 23-фев (без нуля)
-                today_date.strftime("%d.%m"),                   # 23.02
-                today_date.strftime("%d/%m"),                   # 23/02
-                f"{today_date.day} {today_date.strftime('%b')}".lower()  # 23 фев
+                today_date.strftime("%d-%b").lower(),           # 24-фев
+                today_date.strftime("%-d-%b").lower(),          # 24-фев (без нуля)
             ]
+            print(f"🔍 Ищем дату: {date_formats[0]}")  # Отладка
+            
+            # Фильтруем только сегодняшние занятия
+            filtered_schedule = []
+            for item in schedule:
+                for date_format in date_formats:
+                    if item['date'].lower() == date_format:
+                        filtered_schedule.append(item)
+                        break
+            
+            if not filtered_schedule:
+                # Показываем доступные даты
+                available_dates = sorted(set([item['date'] for item in schedule]))
+                dates_list = "\n".join(available_dates[:5])
+                bot.edit_message_text(
+                    f"😕 <b>Нет расписания на сегодня</b>\n\n"
+                    f"Для группы {group} не найдено занятий на {date_formats[0]}.\n\n"
+                    f"📅 <b>Доступные даты:</b>\n{dates_list}\n\n"
+                    f"Попробуй выбрать другую группу или посмотреть всё расписание (📚 Неделя)",
+                    message.chat.id,
+                    msg.message_id,
+                    parse_mode='HTML'
+                )
+                return
+            
+            text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
+            
         elif period == 'tomorrow':
             target_day = (today + 1) % 7
             period_name = "ЗАВТРА"
-            # Получаем завтрашнюю дату в разных форматах
             tomorrow_date = datetime.now() + timedelta(days=1)
             date_formats = [
-                tomorrow_date.strftime("%d-%b").lower(),        # 24-фев
-                tomorrow_date.strftime("%-d-%b").lower(),       # 24-фев (без нуля)
-                tomorrow_date.strftime("%d.%m"),                # 24.02
-                tomorrow_date.strftime("%d/%m"),                # 24/02
-                f"{tomorrow_date.day} {tomorrow_date.strftime('%b')}".lower()  # 24 фев
+                tomorrow_date.strftime("%d-%b").lower(),        # 25-фев
+                tomorrow_date.strftime("%-d-%b").lower(),       # 25-фев (без нуля)
             ]
-        else:  # week
-            target_day = today
-            period_name = "НА БЛИЖАЙШИЕ ДНИ"
-            # Для недели показываем всё расписание
-            text = format_schedule_with_day(schedule, group, target_day, period_name)
-            try:
-                bot.edit_message_text(text, message.chat.id, msg.message_id, parse_mode='HTML')
-            except Exception as e:
-                print(f"Ошибка при редактировании: {e}")
-                bot.send_message(message.chat.id, text, parse_mode='HTML')
-            return
-
-        # Фильтруем расписание по дате (пробуем все форматы)
-        filtered_schedule = []
-
-        # Сначала выводим все доступные даты для отладки
-        available_dates = set()
-        for item in schedule:
-            available_dates.add(item['date'])
-        print(f"📅 Доступные даты на сайте: {sorted(available_dates)}")
-        print(f"🔍 Ищем дату: {date_formats[0]}")
-
-        # Ищем совпадение по любому из форматов
-        for item in schedule:
-            item_date = item['date'].lower().strip()
-            for date_format in date_formats:
-                if date_format in item_date or item_date in date_format:
-                    filtered_schedule.append(item)
-                    break
-
-        # Если не нашли, пробуем просто по дню месяца
-        if not filtered_schedule and period in ['today', 'tomorrow']:
-            target_day_num = datetime.now().day if period == 'today' else (datetime.now() + timedelta(days=1)).day
+            
+            # Фильтруем только завтрашние занятия
+            filtered_schedule = []
             for item in schedule:
-                # Проверяем, есть ли номер дня в строке даты
-                if str(target_day_num) in item['date']:
-                    filtered_schedule.append(item)
-
-        if not filtered_schedule and period in ['today', 'tomorrow']:
-            # Показываем пользователю доступные даты
-            dates_list = "\n".join(sorted(list(available_dates))[:5])
-            bot.edit_message_text(
-                f"😕 <b>Нет расписания на {period_name.lower()}</b>\n\n"
-                f"Для группы {group} не найдено занятий на {date_formats[0]}.\n\n"
-                f"📅 <b>Доступные даты:</b>\n{dates_list}\n\n"
-                f"Попробуй выбрать другую группу или посмотреть всё расписание (📚 Неделя)",
-                message.chat.id,
-                msg.message_id,
-                parse_mode='HTML'
-            )
-            return
-
-        # Форматируем с правильным днем недели для времени пар
-        text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
-
+                for date_format in date_formats:
+                    if item['date'].lower() == date_format:
+                        filtered_schedule.append(item)
+                        break
+            
+            if not filtered_schedule:
+                bot.edit_message_text(
+                    f"😕 <b>Нет расписания на завтра</b>\n\n"
+                    f"Для группы {group} не найдено занятий на {date_formats[0]}.",
+                    message.chat.id,
+                    msg.message_id,
+                    parse_mode='HTML'
+                )
+                return
+            
+            text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
+            
+        else:  # week
+            # Для недели показываем всё расписание
+            text = format_schedule_with_day(schedule, group, today, "НА БЛИЖАЙШИЕ ДНИ")
+        
         try:
             bot.edit_message_text(text, message.chat.id, msg.message_id, parse_mode='HTML')
         except Exception as e:
@@ -555,6 +566,7 @@ def show_schedule(message, period):
             msg.message_id,
             parse_mode='HTML'
         )
+
 # ---------- Запуск ----------
 if __name__ == "__main__":
     print("\n" + "="*50)
