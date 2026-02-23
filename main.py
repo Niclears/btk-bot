@@ -492,40 +492,50 @@ def show_schedule(message, period):
     schedule = get_schedule_from_site(group)
 
     if schedule:
-        # Определяем день недели для показа времени пар
-        today = datetime.now().weekday()
+        print(f"\n{'='*50}")
+        print(f"📊 ВСЕГО НАЙДЕНО: {len(schedule)} занятий для группы {group}")
         
-        # Получаем сегодняшнюю дату в разных форматах
+        # Показываем все уникальные даты в расписании
+        all_dates = sorted(set([item['date'] for item in schedule]))
+        print(f"📅 Даты в расписании: {all_dates}")
+        
+        # Определяем сегодняшнюю дату
         now = datetime.now()
-        tomorrow = now + timedelta(days=1)
         
-        # Форматы дат как на сайте (с русскими месяцами)
+        # Словарь русских месяцев
         months_ru = {
             1: 'янв', 2: 'фев', 3: 'мар', 4: 'апр', 5: 'май', 6: 'июн',
             7: 'июл', 8: 'авг', 9: 'сен', 10: 'окт', 11: 'ноя', 12: 'дек'
         }
         
         today_str = f"{now.day}-{months_ru[now.month]}"
-        tomorrow_str = f"{tomorrow.day}-{months_ru[tomorrow.month]}"
+        tomorrow_str = f"{(now + timedelta(days=1)).day}-{months_ru[(now + timedelta(days=1)).month]}"
         
-        print(f"📅 Сегодняшняя дата (сайт): {today_str}")
-        print(f"📅 Завтрашняя дата (сайт): {tomorrow_str}")
+        print(f"📅 Сегодня (вычислено): {today_str}")
+        print(f"📅 Завтра (вычислено): {tomorrow_str}")
+        
+        # Определяем день недели
+        today = now.weekday()
         
         if period == 'today':
             target_day = today
             period_name = "СЕГОДНЯ"
             target_date = today_str
             
+            print(f"🔍 Ищем дату: {target_date}")
+            
             # Фильтруем только сегодняшние занятия
             filtered_schedule = []
             for item in schedule:
+                print(f"  Сравниваем с: {item['date']} -> {item['date'].lower() == target_date.lower()}")
                 if item['date'].lower() == target_date.lower():
                     filtered_schedule.append(item)
             
+            print(f"✅ Найдено сегодня: {len(filtered_schedule)}")
+            
             if not filtered_schedule:
                 # Показываем доступные даты
-                available_dates = sorted(set([item['date'] for item in schedule]))
-                dates_list = "\n".join(available_dates[:10])
+                dates_list = "\n".join(all_dates[:10])
                 bot.edit_message_text(
                     f"😕 <b>Нет расписания на сегодня</b>\n\n"
                     f"Для группы {group} не найдено занятий на {target_date}.\n\n"
@@ -544,11 +554,16 @@ def show_schedule(message, period):
             period_name = "ЗАВТРА"
             target_date = tomorrow_str
             
+            print(f"🔍 Ищем дату: {target_date}")
+            
             # Фильтруем только завтрашние занятия
             filtered_schedule = []
             for item in schedule:
+                print(f"  Сравниваем с: {item['date']} -> {item['date'].lower() == target_date.lower()}")
                 if item['date'].lower() == target_date.lower():
                     filtered_schedule.append(item)
+            
+            print(f"✅ Найдено завтра: {len(filtered_schedule)}")
             
             if not filtered_schedule:
                 bot.edit_message_text(
@@ -572,7 +587,6 @@ def show_schedule(message, period):
         except Exception as e:
             print(f"Ошибка при редактировании: {e}")
             if len(text) > 4096:
-                # Если текст слишком длинный, разбиваем на части
                 for i in range(0, len(text), 4096):
                     bot.send_message(message.chat.id, text[i:i+4096], parse_mode='HTML')
             else:
