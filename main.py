@@ -465,9 +465,9 @@ def show_schedule(message, period):
     # Устанавливаем часовой пояс для корректной даты
     os.environ['TZ'] = 'Europe/Minsk'
     try:
-        time.tzset()  # Перезагружаем настройки времени (для Unix)
+        time.tzset()
     except:
-        pass  # Для Windows игнорируем
+        pass
     
     # Получаем группу пользователя
     try:
@@ -495,34 +495,42 @@ def show_schedule(message, period):
         # Определяем день недели для показа времени пар
         today = datetime.now().weekday()
         
+        # Получаем сегодняшнюю дату в разных форматах
+        now = datetime.now()
+        tomorrow = now + timedelta(days=1)
+        
+        # Форматы дат как на сайте (с русскими месяцами)
+        months_ru = {
+            1: 'янв', 2: 'фев', 3: 'мар', 4: 'апр', 5: 'май', 6: 'июн',
+            7: 'июл', 8: 'авг', 9: 'сен', 10: 'окт', 11: 'ноя', 12: 'дек'
+        }
+        
+        today_str = f"{now.day}-{months_ru[now.month]}"
+        tomorrow_str = f"{tomorrow.day}-{months_ru[tomorrow.month]}"
+        
+        print(f"📅 Сегодняшняя дата (сайт): {today_str}")
+        print(f"📅 Завтрашняя дата (сайт): {tomorrow_str}")
+        
         if period == 'today':
             target_day = today
             period_name = "СЕГОДНЯ"
-            # Получаем сегодняшнюю дату
-            today_date = datetime.now()
-            date_formats = [
-                today_date.strftime("%d-%b").lower(),           # 24-фев
-                today_date.strftime("%-d-%b").lower(),          # 24-фев (без нуля)
-            ]
-            print(f"🔍 Ищем дату: {date_formats[0]}")  # Отладка
+            target_date = today_str
             
             # Фильтруем только сегодняшние занятия
             filtered_schedule = []
             for item in schedule:
-                for date_format in date_formats:
-                    if item['date'].lower() == date_format:
-                        filtered_schedule.append(item)
-                        break
+                if item['date'].lower() == target_date.lower():
+                    filtered_schedule.append(item)
             
             if not filtered_schedule:
                 # Показываем доступные даты
                 available_dates = sorted(set([item['date'] for item in schedule]))
-                dates_list = "\n".join(available_dates[:5])
+                dates_list = "\n".join(available_dates[:10])
                 bot.edit_message_text(
                     f"😕 <b>Нет расписания на сегодня</b>\n\n"
-                    f"Для группы {group} не найдено занятий на {date_formats[0]}.\n\n"
+                    f"Для группы {group} не найдено занятий на {target_date}.\n\n"
                     f"📅 <b>Доступные даты:</b>\n{dates_list}\n\n"
-                    f"Попробуй выбрать другую группу или посмотреть всё расписание (📚 Неделя)",
+                    f"Попробуй посмотреть всё расписание (📚 Неделя)",
                     message.chat.id,
                     msg.message_id,
                     parse_mode='HTML'
@@ -534,24 +542,19 @@ def show_schedule(message, period):
         elif period == 'tomorrow':
             target_day = (today + 1) % 7
             period_name = "ЗАВТРА"
-            tomorrow_date = datetime.now() + timedelta(days=1)
-            date_formats = [
-                tomorrow_date.strftime("%d-%b").lower(),        # 25-фев
-                tomorrow_date.strftime("%-d-%b").lower(),       # 25-фев (без нуля)
-            ]
+            target_date = tomorrow_str
             
             # Фильтруем только завтрашние занятия
             filtered_schedule = []
             for item in schedule:
-                for date_format in date_formats:
-                    if item['date'].lower() == date_format:
-                        filtered_schedule.append(item)
-                        break
+                if item['date'].lower() == target_date.lower():
+                    filtered_schedule.append(item)
             
             if not filtered_schedule:
                 bot.edit_message_text(
                     f"😕 <b>Нет расписания на завтра</b>\n\n"
-                    f"Для группы {group} не найдено занятий на {date_formats[0]}.",
+                    f"Для группы {group} не найдено занятий на {target_date}.\n\n"
+                    f"Попробуй посмотреть всё расписание (📚 Неделя)",
                     message.chat.id,
                     msg.message_id,
                     parse_mode='HTML'
@@ -568,7 +571,12 @@ def show_schedule(message, period):
             bot.edit_message_text(text, message.chat.id, msg.message_id, parse_mode='HTML')
         except Exception as e:
             print(f"Ошибка при редактировании: {e}")
-            bot.send_message(message.chat.id, text, parse_mode='HTML')
+            if len(text) > 4096:
+                # Если текст слишком длинный, разбиваем на части
+                for i in range(0, len(text), 4096):
+                    bot.send_message(message.chat.id, text[i:i+4096], parse_mode='HTML')
+            else:
+                bot.send_message(message.chat.id, text, parse_mode='HTML')
     else:
         bot.edit_message_text(
             "😕 <b>Не удалось найти расписание.</b>\n\n"
@@ -578,7 +586,6 @@ def show_schedule(message, period):
             msg.message_id,
             parse_mode='HTML'
         )
-
 # ---------- Запуск ----------
 if __name__ == "__main__":
     print("\n" + "="*50)
