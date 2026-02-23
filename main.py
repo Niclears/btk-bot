@@ -154,23 +154,49 @@ def get_bell_schedule(day_of_week):
 # ---------- Парсинг расписания занятий ----------
 def get_schedule_from_site(group_name):
     url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+        'Connection': 'keep-alive',
+    }
+    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        table = soup.find('table')
-        if not table:
-            print("❌ Таблица не найдена")
+        print(f"🔄 Пытаюсь подключиться к сайту: {url}")
+        response = requests.get(url, headers=headers, timeout=15)
+        print(f"✅ Статус ответа: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"❌ Сайт вернул ошибку: {response.status_code}")
             return []
-
+        
+        response.encoding = 'utf-8'
+        print(f"📄 Размер страницы: {len(response.text)} символов")
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем таблицу разными способами
+        table = None
+        possible_tables = soup.find_all('table')
+        print(f"🔍 Найдено таблиц на странице: {len(possible_tables)}")
+        
+        if possible_tables:
+            # Берем первую таблицу (обычно она и есть расписание)
+            table = possible_tables[0]
+            print("✅ Таблица найдена")
+        else:
+            print("❌ Таблицы не найдены")
+            # Сохраним часть страницы для отладки
+            print(f"Первые 500 символов страницы: {soup.prettify()[:500]}")
+            return []
+        
         schedule_items = []
         rows = table.find_all('tr')[1:]  # пропускаем заголовок
-
-        for row in rows:
+        print(f"📊 Найдено строк в таблице: {len(rows)}")
+        
+        for row_num, row in enumerate(rows[:10]):  # первые 10 строк для отладки
             cells = row.find_all('td')
+            print(f"Строка {row_num+1}, ячеек: {len(cells)}")
             if len(cells) >= 7:
                 date = cells[0].text.strip()
                 group = cells[1].text.strip()
@@ -178,7 +204,9 @@ def get_schedule_from_site(group_name):
                 subject = cells[3].text.strip()
                 teacher = cells[4].text.strip()
                 room = cells[5].text.strip()
-
+                
+                print(f"Найдено: {date}, {group}, {lesson_num}, {subject}")
+                
                 if group == group_name:
                     schedule_items.append({
                         'date': date,
@@ -187,15 +215,21 @@ def get_schedule_from_site(group_name):
                         'teacher': teacher,
                         'room': room
                     })
-
+        
         print(f"✅ Найдено {len(schedule_items)} занятий для группы {group_name}")
         return schedule_items
-
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Ошибка запроса: {e}")
+        
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ Ошибка подключения: {e}")
+        print("🔧 Возможно, сайт колледжа недоступен из Render")
+        return []
+    except requests.exceptions.Timeout as e:
+        print(f"❌ Таймаут: {e}")
         return []
     except Exception as e:
-        print(f"❌ Ошибка парсинга: {e}")
+        print(f"❌ Неизвестная ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 def get_lesson_time(lesson_num, day_of_week):
