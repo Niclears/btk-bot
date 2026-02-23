@@ -30,6 +30,10 @@ print("✅ Все библиотеки загружены")
 # ---------- Flask сервер для UptimeRobot ----------
 app = Flask(__name__)
 
+@app.route('/ping')
+def ping():
+    return "pong"
+
 @app.route('/')
 def home():
     return "Бот расписания БТК работает!"
