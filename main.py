@@ -4,11 +4,14 @@ import subprocess
 from datetime import datetime, timedelta
 import time
 import sqlite3
+import hashlib
+import json
+from threading import Lock
 
 # Сначала устанавливаем библиотеки
 print("🔄 Проверка и установка библиотек...")
 
-packages = ['pytelegrambotapi', 'requests', 'beautifulsoup4', 'python-dotenv', 'flask']
+packages = ['pytelegrambotapi', 'requests', 'beautifulsoup4', 'python-dotenv', 'flask', 'apscheduler']
 for package in packages:
     try:
         __import__(package.replace('-', '_'))
@@ -24,6 +27,8 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 print("✅ Все библиотеки загружены")
 
@@ -58,6 +63,9 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# ---------- Твой Telegram ID (ЗАМЕНИ НА СВОЙ) ----------
+YOUR_USER_ID = 1702505914  # ❗ СЮДА ВСТАВЬ СВОЙ ID
+
 # ---------- База данных ----------
 def init_db():
     conn = sqlite3.connect('schedule.db')
@@ -69,6 +77,103 @@ def init_db():
     print("💾 База данных инициализирована")
 
 init_db()
+
+# ---------- ПЛАНИРОВЩИК ДЛЯ ПРОВЕРКИ РАСПИСАНИЯ ----------
+previous_schedule_hash = None
+
+def get_all_groups_schedule():
+    """Получает расписание для нескольких групп, чтобы проверить изменения"""
+    all_schedule = []
+    # Проверяем популярные группы
+    sample_groups = ['213', '301', '483', '105', '212', '295']
+    
+    for group in sample_groups:
+        try:
+            schedule = get_schedule_from_site(group)
+            all_schedule.extend(schedule)
+            time.sleep(0.5)  # Небольшая задержка, чтобы не нагружать сайт
+        except Exception as e:
+            print(f"❌ Ошибка при проверке группы {group}: {e}")
+    
+    return all_schedule
+
+def get_schedule_hash():
+    """Получает хеш текущего расписания для сравнения"""
+    try:
+        all_schedule = get_all_groups_schedule()
+        # Создаем хеш от всего расписания
+        schedule_str = json.dumps(all_schedule, sort_keys=True, ensure_ascii=False)
+        return hashlib.md5(schedule_str.encode('utf-8')).hexdigest()
+    except Exception as e:
+        print(f"❌ Ошибка при создании хеша: {e}")
+        return None
+
+def check_schedule_updates():
+    """Проверяет обновления расписания и шлёт уведомление только тебе"""
+    global previous_schedule_hash
+    
+    print(f"\n{'='*50}")
+    print(f"🔄 Проверка обновлений расписания ({datetime.now().strftime('%H:%M')})")
+    
+    try:
+        # Получаем текущее расписание
+        current_hash = get_schedule_hash()
+        
+        if not current_hash:
+            print("❌ Не удалось получить хеш")
+            return
+        
+        # Если есть предыдущий хеш и он отличается
+        if previous_schedule_hash and current_hash != previous_schedule_hash:
+            print("✅ ИЗМЕНЕНИЯ ОБНАРУЖЕНЫ!")
+            
+            # Отправляем только тебе
+            bot.send_message(
+                YOUR_USER_ID,
+                f"🔔 <b>Расписание обновилось!</b>\n\n"
+                f"Было: {previous_schedule_hash[:8]}\n"
+                f"Стало: {current_hash[:8]}\n"
+                f"Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
+                parse_mode='HTML'
+            )
+            print("📨 Уведомление отправлено")
+        
+        # Обновляем хеш
+        previous_schedule_hash = current_hash
+        print(f"✅ Текущий хеш: {current_hash[:8]}...")
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+    
+    print('='*50)
+
+def start_scheduler():
+    """Запускает планировщик проверки расписания"""
+    scheduler = BackgroundScheduler()
+    
+    # Проверка каждые 30 минут с 9 до 16 часов (рабочее время)
+    scheduler.add_job(
+        check_schedule_updates,
+        trigger=CronTrigger(minute='*/30', hour='9-16'),
+        id='schedule_checker',
+        name='Check schedule updates every 30 min (9-16)',
+        replace_existing=True
+    )
+    
+    # Также добавим проверку при запуске
+    scheduler.add_job(
+        check_schedule_updates,
+        trigger='date',  # Выполнится один раз при запуске
+        id='initial_check',
+        name='Initial schedule check'
+    )
+    
+    scheduler.start()
+    print("⏰ Планировщик проверки расписания запущен")
+    print("⏰ Режим работы: каждые 30 минут с 9:00 до 16:00")
+    print("👤 Уведомления будут приходить только тебе (ID: {})".format(YOUR_USER_ID))
+    
+    return scheduler
 
 # ---------- РАСПИСАНИЕ ЗВОНКОВ ----------
 def get_bell_schedule(day_of_week):
@@ -173,7 +278,6 @@ def get_schedule_from_site(group_name):
     try:
         while True:
             # Формируем URL с параметрами пагинации
-            # На сайте используется limitstart
             url = f"{base_url}?limitstart={page * limit}"
             
             print(f"🔄 Загружаю страницу {page + 1}...")
@@ -194,14 +298,6 @@ def get_schedule_from_site(group_name):
             if not rows:
                 print(f"✅ Достигнут конец данных")
                 break
-            
-            # Ищем информацию о пагинации
-            pagination = soup.find('div', class_='pagination')
-            if pagination:
-                # Пробуем найти общее количество записей
-                counter = pagination.find('div', class_='counter')
-                if counter:
-                    print(f"📄 Информация о пагинации: {counter.text}")
             
             page_items = 0
             for row in rows:
@@ -227,7 +323,6 @@ def get_schedule_from_site(group_name):
             print(f"✅ Страница {page + 1}: найдено {page_items} занятий для группы {group_name}")
             
             # Проверяем, есть ли следующая страница
-            # Ищем ссылку "next" или "далее"
             next_link = soup.find('a', title='Вперед')
             if not next_link:
                 next_link = soup.find('a', class_='next')
@@ -239,9 +334,7 @@ def get_schedule_from_site(group_name):
                 break
             
             page += 1
-            
-            # Небольшая задержка, чтобы не нагружать сайт
-            time.sleep(1)
+            time.sleep(1)  # Задержка, чтобы не нагружать сайт
             
         print(f"🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
         return all_schedule_items
@@ -254,6 +347,7 @@ def get_schedule_from_site(group_name):
         import traceback
         traceback.print_exc()
         return []
+
 def get_lesson_time(lesson_num, day_of_week):
     """
     Возвращает время начала и конца пары по номеру и дню недели
@@ -380,7 +474,7 @@ def start(message):
         "• Показывать расписание звонков\n"
         "• Сохранять твою группу\n\n"
         "📝 <b>Как пользоваться:</b>\n"
-        "1. Отправь номер группы (например, 213)\n"
+        "1. Отправь номер группы (например, 301)\n"
         "2. Нажимай кнопки для просмотра\n\n"
         "🎯 <b>Кнопки:</b>\n"
         "📅 Сегодня - расписание на сегодня\n"
@@ -461,7 +555,7 @@ def show_help(message):
         "• Проверь, сохранена ли группа\n"
         "• Попробуй нажать /start\n"
         "• Напиши позже, если сайт колледжа недоступен\n\n"
-        "🛠️ <b>Разработчик:</b> @твой_username"
+        "🛠️ <b>Разработчик:</b> Михась"
     )
     bot.send_message(message.chat.id, help_text, parse_mode='HTML')
 
@@ -531,7 +625,6 @@ def show_schedule(message, period):
             # Фильтруем только сегодняшние занятия
             filtered_schedule = []
             for item in schedule:
-                print(f"  Сравниваем с: {item['date']} -> {item['date'].lower() == target_date.lower()}")
                 if item['date'].lower() == target_date.lower():
                     filtered_schedule.append(item)
             
@@ -563,7 +656,6 @@ def show_schedule(message, period):
             # Фильтруем только завтрашние занятия
             filtered_schedule = []
             for item in schedule:
-                print(f"  Сравниваем с: {item['date']} -> {item['date'].lower() == target_date.lower()}")
                 if item['date'].lower() == target_date.lower():
                     filtered_schedule.append(item)
             
@@ -604,6 +696,7 @@ def show_schedule(message, period):
             msg.message_id,
             parse_mode='HTML'
         )
+
 # ---------- Запуск ----------
 if __name__ == "__main__":
     print("\n" + "="*50)
@@ -612,6 +705,9 @@ if __name__ == "__main__":
 
     # Запускаем Flask в отдельном потоке
     keep_alive()
+
+    # Запускаем планировщик проверки расписания
+    scheduler = start_scheduler()
 
     print("✅ Бот готов к работе!")
     print("📱 Найди своего бота в Telegram и отправь /start")
@@ -622,3 +718,7 @@ if __name__ == "__main__":
         bot.polling(non_stop=True, interval=0)
     except Exception as e:
         print(f"❌ Ошибка при запуске бота: {e}")
+    finally:
+        # Останавливаем планировщик при завершении бота
+        if 'scheduler' in locals():
+            scheduler.shutdown()
