@@ -154,9 +154,9 @@ def start_scheduler():
     # Проверка каждые 30 минут с 9 до 16 часов (рабочее время)
     scheduler.add_job(
         check_schedule_updates,
-        trigger=CronTrigger(minute='*/30', hour='9-16'),
+        trigger=CronTrigger(minute='*/30', hour='9-20'),
         id='schedule_checker',
-        name='Check schedule updates every 30 min (9-16)',
+        name='Check schedule updates every 30 min (9-20)',
         replace_existing=True
     )
     
