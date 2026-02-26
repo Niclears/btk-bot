@@ -63,8 +63,13 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ---------- Твой Telegram ID (ЗАМЕНИ НА СВОЙ) ----------
-YOUR_USER_ID = 1702505914  # ❗ СЮДА ВСТАВЬ СВОЙ ID
+# ---------- Твой Telegram ID ----------
+YOUR_USER_ID = 1702505914  # ❗ ТВОЙ ID
+
+# ---------- НАСТРОЙКИ ----------
+NOTIFICATIONS_ENABLED = True  # True - уведомления для всех подписчиков
+subscribed_users = set()  # Множество подписчиков
+subscribers_lock = Lock()  # Для безопасной работы с множеством
 
 # ---------- База данных ----------
 def init_db():
@@ -74,9 +79,64 @@ def init_db():
                  (user_id INTEGER PRIMARY KEY, group_name TEXT)''')
     conn.commit()
     conn.close()
-    print("💾 База данных инициализирована")
+    print("💾 База данных пользователей инициализирована")
 
 init_db()
+
+# ---------- РАБОТА С ПОДПИСЧИКАМИ ----------
+def init_subscribers_db():
+    """Создаёт таблицу для подписчиков в базе данных"""
+    try:
+        conn = sqlite3.connect('schedule.db')
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS subscribers
+                     (user_id INTEGER PRIMARY KEY)''')
+        conn.commit()
+        conn.close()
+        print("💾 Таблица подписчиков инициализирована")
+    except Exception as e:
+        print(f"❌ Ошибка при создании таблицы подписчиков: {e}")
+
+def load_subscribers():
+    """Загружает подписчиков из базы данных"""
+    global subscribed_users
+    try:
+        conn = sqlite3.connect('schedule.db')
+        c = conn.cursor()
+        c.execute("SELECT user_id FROM subscribers")
+        rows = c.fetchall()
+        with subscribers_lock:
+            subscribed_users = set([row[0] for row in rows])
+        conn.close()
+        print(f"📋 Загружено {len(subscribed_users)} подписчиков")
+    except Exception as e:
+        print(f"❌ Ошибка загрузки подписчиков: {e}")
+
+def save_subscriber(user_id):
+    """Сохраняет подписчика в базу данных"""
+    try:
+        conn = sqlite3.connect('schedule.db')
+        c = conn.cursor()
+        c.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения подписчика: {e}")
+
+def remove_subscriber(user_id):
+    """Удаляет подписчика из базы данных"""
+    try:
+        conn = sqlite3.connect('schedule.db')
+        c = conn.cursor()
+        c.execute("DELETE FROM subscribers WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка удаления подписчика: {e}")
+
+# Инициализируем таблицу подписчиков и загружаем их
+init_subscribers_db()
+load_subscribers()
 
 # ---------- ПЛАНИРОВЩИК ДЛЯ ПРОВЕРКИ РАСПИСАНИЯ ----------
 previous_schedule_hash = None
@@ -108,37 +168,58 @@ def get_schedule_hash():
         print(f"❌ Ошибка при создании хеша: {e}")
         return None
 
+def notify_all_users():
+    """Рассылает уведомления всем подписчикам"""
+    with subscribers_lock:
+        if not subscribed_users:
+            print("📭 Нет подписчиков для уведомления")
+            return
+        users_to_notify = list(subscribed_users)
+    
+    message = (
+        "🔔 <b>ОБНОВЛЕНИЕ РАСПИСАНИЯ!</b>\n\n"
+        "На сайте колледжа появились изменения.\n"
+        "Нажми 📚 Неделя, чтобы посмотреть обновлённое расписание.\n\n"
+        f"📅 <i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>"
+    )
+    
+    success = 0
+    failed = 0
+    
+    print(f"📨 Отправка уведомлений {len(users_to_notify)} подписчикам...")
+    
+    for user_id in users_to_notify:
+        try:
+            bot.send_message(user_id, message, parse_mode='HTML')
+            success += 1
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+            failed += 1
+    
+    print(f"📨 Уведомления: {success} отправлено, {failed} ошибок")
+
 def check_schedule_updates():
-    """Проверяет обновления расписания и шлёт уведомление только тебе"""
+    """Проверяет обновления расписания"""
     global previous_schedule_hash
     
     print(f"\n{'='*50}")
     print(f"🔄 Проверка обновлений расписания ({datetime.now().strftime('%H:%M')})")
     
     try:
-        # Получаем текущее расписание
         current_hash = get_schedule_hash()
         
         if not current_hash:
             print("❌ Не удалось получить хеш")
             return
         
-        # Если есть предыдущий хеш и он отличается
         if previous_schedule_hash and current_hash != previous_schedule_hash:
             print("✅ ИЗМЕНЕНИЯ ОБНАРУЖЕНЫ!")
             
-            # Отправляем только тебе
-            bot.send_message(
-                YOUR_USER_ID,
-                f"🔔 <b>Расписание обновилось!</b>\n\n"
-                f"Было: {previous_schedule_hash[:8]}\n"
-                f"Стало: {current_hash[:8]}\n"
-                f"Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
-                parse_mode='HTML'
-            )
-            print("📨 Уведомление отправлено")
+            # Отправляем уведомления всем подписчикам
+            if NOTIFICATIONS_ENABLED:
+                notify_all_users()
         
-        # Обновляем хеш
         previous_schedule_hash = current_hash
         print(f"✅ Текущий хеш: {current_hash[:8]}...")
         
@@ -151,27 +232,25 @@ def start_scheduler():
     """Запускает планировщик проверки расписания"""
     scheduler = BackgroundScheduler()
     
-    # Проверка каждые 30 минут с 9 до 16 часов (рабочее время)
+    # Проверка каждые 20 минут с 9 до 20 часов
     scheduler.add_job(
         check_schedule_updates,
-        trigger=CronTrigger(minute='*/30', hour='9-20'),
+        trigger=CronTrigger(minute='*/20', hour='9-20'),
         id='schedule_checker',
-        name='Check schedule updates every 30 min (9-20)',
         replace_existing=True
     )
     
-    # Также добавим проверку при запуске
+    # Проверка при запуске
     scheduler.add_job(
         check_schedule_updates,
-        trigger='date',  # Выполнится один раз при запуске
-        id='initial_check',
-        name='Initial schedule check'
+        trigger='date',
+        id='initial_check'
     )
     
     scheduler.start()
     print("⏰ Планировщик проверки расписания запущен")
-    print("⏰ Режим работы: каждые 30 минут с 9:00 до 16:00")
-    print("👤 Уведомления будут приходить только тебе (ID: {})".format(YOUR_USER_ID))
+    print("⏰ Режим работы: каждые 30 минут с 9:00 до 20:00")
+    print(f"👥 Уведомления будут приходить всем подписчикам")
     
     return scheduler
 
@@ -461,18 +540,39 @@ def format_schedule_with_day(schedule, group_name, target_day, period_name):
     return text
 
 # ---------- Команды бота ----------
+def show_subscription_menu(message):
+    """Показывает меню подписки"""
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    btn1 = telebot.types.InlineKeyboardButton("✅ Подписаться", callback_data='subscribe')
+    btn2 = telebot.types.InlineKeyboardButton("❌ Отписаться", callback_data='unsubscribe')
+    btn3 = telebot.types.InlineKeyboardButton("📊 Статус", callback_data='status')
+    markup.add(btn1, btn2, btn3)
+    
+    with subscribers_lock:
+        status = "✅ Подписан" if message.chat.id in subscribed_users else "❌ Не подписан"
+    
+    bot.send_message(
+        message.chat.id,
+        f"📢 <b>Управление подпиской</b>\n\n"
+        f"Текущий статус: {status}\n\n"
+        f"🔔 При изменении расписания ты будешь получать уведомление.",
+        parse_mode='HTML',
+        reply_markup=markup
+    )
+
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add('📅 Сегодня', '📆 Завтра', '📚 Неделя')
-    markup.add('🔔 Звонки', 'ℹ️ Помощь')
+    markup.add('🔔 Звонки', 'ℹ️ Помощь', '📢 Подписка')
 
     welcome_text = (
         "👋 <b>Привет! Я бот расписания БТК</b>\n\n"
         "📌 <b>Что я умею:</b>\n"
         "• Показывать расписание занятий\n"
         "• Показывать расписание звонков\n"
-        "• Сохранять твою группу\n\n"
+        "• Сохранять твою группу\n"
+        "• Уведомлять об изменениях в расписании (кнопка 📢 Подписка)\n\n"
         "📝 <b>Как пользоваться:</b>\n"
         "1. Отправь номер группы (например, 301)\n"
         "2. Нажимай кнопки для просмотра\n\n"
@@ -480,7 +580,8 @@ def start(message):
         "📅 Сегодня - расписание на сегодня\n"
         "📆 Завтра - расписание на завтра\n"
         "📚 Неделя - всё расписание\n"
-        "🔔 Звонки - расписание звонков"
+        "🔔 Звонки - расписание звонков\n"
+        "📢 Подписка - уведомления об изменениях"
     )
 
     bot.send_message(
@@ -489,6 +590,122 @@ def start(message):
         parse_mode='HTML',
         reply_markup=markup
     )
+
+@bot.message_handler(commands=['subscribe'])
+def subscribe(message):
+    """Подписка на уведомления"""
+    user_id = message.chat.id
+    
+    with subscribers_lock:
+        if user_id in subscribed_users:
+            bot.send_message(
+                user_id,
+                "ℹ️ Ты уже подписан на уведомления!",
+                parse_mode='HTML'
+            )
+            return
+        
+        subscribed_users.add(user_id)
+    
+    save_subscriber(user_id)
+    
+    bot.send_message(
+        user_id,
+        "✅ <b>Ты подписан на уведомления!</b>\n\n"
+        "Я буду присылать сообщение, когда расписание обновится.\n"
+        "Проверка происходит каждые 30 минут с 9:00 до 20:00.",
+        parse_mode='HTML'
+    )
+
+@bot.message_handler(commands=['unsubscribe'])
+def unsubscribe(message):
+    """Отписка от уведомлений"""
+    user_id = message.chat.id
+    
+    with subscribers_lock:
+        if user_id not in subscribed_users:
+            bot.send_message(
+                user_id,
+                "ℹ️ Ты не подписан на уведомления.",
+                parse_mode='HTML'
+            )
+            return
+        
+        subscribed_users.remove(user_id)
+    
+    remove_subscriber(user_id)
+    
+    bot.send_message(
+        user_id,
+        "❌ <b>Ты отписан от уведомлений.</b>\n\n"
+        "Если захочешь снова подписаться, нажми /subscribe",
+        parse_mode='HTML'
+    )
+
+@bot.message_handler(commands=['stats'])
+def stats(message):
+    """Статистика подписчиков (только для админа)"""
+    if message.chat.id != YOUR_USER_ID:
+        bot.send_message(message.chat.id, "❌ Эта команда только для администратора")
+        return
+    
+    with subscribers_lock:
+        count = len(subscribed_users)
+    
+    bot.send_message(
+        message.chat.id,
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Подписчиков: {count}\n"
+        f"🔔 Уведомления: {'ВКЛЮЧЕНЫ' if NOTIFICATIONS_ENABLED else 'ВЫКЛЮЧЕНЫ'}",
+        parse_mode='HTML'
+    )
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    """Обработчик нажатий на инлайн-кнопки"""
+    user_id = call.message.chat.id
+    
+    if call.data == 'subscribe':
+        with subscribers_lock:
+            if user_id in subscribed_users:
+                bot.answer_callback_query(call.id, "✅ Ты уже подписан!")
+                return
+            subscribed_users.add(user_id)
+        
+        save_subscriber(user_id)
+        bot.answer_callback_query(call.id, "✅ Ты подписан!")
+        
+    elif call.data == 'unsubscribe':
+        with subscribers_lock:
+            if user_id not in subscribed_users:
+                bot.answer_callback_query(call.id, "❌ Ты не подписан")
+                return
+            subscribed_users.remove(user_id)
+        
+        remove_subscriber(user_id)
+        bot.answer_callback_query(call.id, "❌ Ты отписался")
+        
+    elif call.data == 'status':
+        with subscribers_lock:
+            status = "✅ Подписан" if user_id in subscribed_users else "❌ Не подписан"
+        bot.answer_callback_query(call.id, status)
+    
+    # Обновляем сообщение с меню
+    with subscribers_lock:
+        status = "✅ Подписан" if user_id in subscribed_users else "❌ Не подписан"
+    
+    try:
+        bot.edit_message_text(
+            f"📢 <b>Управление подпиской</b>\n\n"
+            f"Текущий статус: {status}\n\n"
+            f"🔔 При изменении расписания ты будешь получать уведомление.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='HTML',
+            reply_markup=call.message.reply_markup
+        )
+    except:
+        pass
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
@@ -504,6 +721,8 @@ def handle_message(message):
         show_bell_schedule(message)
     elif text == 'ℹ️ Помощь':
         show_help(message)
+    elif text == '📢 Подписка':
+        show_subscription_menu(message)
     else:
         # Сохраняем группу
         try:
@@ -550,7 +769,10 @@ def show_help(message):
         "• <b>📅 Сегодня</b> - расписание на сегодня\n"
         "• <b>📆 Завтра</b> - расписание на завтра\n"
         "• <b>📚 Неделя</b> - всё расписание\n"
-        "• <b>🔔 Звонки</b> - расписание звонков\n\n"
+        "• <b>🔔 Звонки</b> - расписание звонков\n"
+        "• <b>📢 Подписка</b> - уведомления об изменениях\n"
+        "• <b>/subscribe</b> - подписаться\n"
+        "• <b>/unsubscribe</b> - отписаться\n\n"
         "❓ <b>Если бот не отвечает:</b>\n"
         "• Проверь, сохранена ли группа\n"
         "• Попробуй нажать /start\n"
