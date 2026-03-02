@@ -874,17 +874,18 @@ def show_schedule(message, period):
         # Определяем сегодняшнюю дату
         now = datetime.now()
         
-        # Словарь русских месяцев
-        months_ru = {
-            1: 'янв', 2: 'фев', 3: 'мар', 4: 'апр', 5: 'май', 6: 'июн',
-            7: 'июл', 8: 'авг', 9: 'сен', 10: 'окт', 11: 'ноя', 12: 'дек'
+        # Словарь русских месяцев (ПОЛНЫЕ названия как на сайте)
+        months_ru_full = {
+            1: 'января', 2: 'февраля', 3: 'марта', 4: 'апреля', 5: 'мая', 6: 'июня',
+            7: 'июля', 8: 'августа', 9: 'сентября', 10: 'октября', 11: 'ноября', 12: 'декабря'
         }
         
-        today_str = f"{now.day}-{months_ru[now.month]}"
-        tomorrow_str = f"{(now + timedelta(days=1)).day}-{months_ru[(now + timedelta(days=1)).month]}"
+        # Формат как на сайте: с ведущим нулём и полным месяцем
+        today_str = f"{now.day:02d}-{months_ru_full[now.month]}"
+        tomorrow_str = f"{(now + timedelta(days=1)).day:02d}-{months_ru_full[(now + timedelta(days=1)).month]}"
         
-        print(f"📅 Сегодня (вычислено): {today_str}")
-        print(f"📅 Завтра (вычислено): {tomorrow_str}")
+        print(f"📅 Сегодня (ищем): {today_str}")
+        print(f"📅 Завтра (ищем): {tomorrow_str}")
         
         # Определяем день недели
         today_weekday = now.weekday()
