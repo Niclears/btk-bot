@@ -73,29 +73,65 @@ subscribers_lock = Lock()  # Для безопасной работы с мно�
 
 # ---------- База данных ----------
 def init_db():
-    conn = sqlite3.connect('schedule.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, group_name TEXT)''')
-    conn.commit()
-    conn.close()
-    print("💾 База данных пользователей инициализирована")
-
-init_db()
-
-# ---------- РАБОТА С ПОДПИСЧИКАМИ ----------
-def init_subscribers_db():
-    """Создаёт таблицу для подписчиков в базе данных"""
+    """Создаёт все необходимые таблицы в базе данных"""
     try:
         conn = sqlite3.connect('schedule.db')
         c = conn.cursor()
+        
+        # Таблица пользователей и их групп
+        c.execute('''CREATE TABLE IF NOT EXISTS users
+                     (user_id INTEGER PRIMARY KEY, 
+                      group_name TEXT,
+                      subscribed INTEGER DEFAULT 0,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # Таблица подписчиков (для обратной совместимости)
         c.execute('''CREATE TABLE IF NOT EXISTS subscribers
-                     (user_id INTEGER PRIMARY KEY)''')
+                     (user_id INTEGER PRIMARY KEY,
+                      subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # Таблица для хранения последнего расписания (чтобы не терять хеш при перезапуске)
+        c.execute('''CREATE TABLE IF NOT EXISTS schedule_hash
+                     (id INTEGER PRIMARY KEY CHECK (id = 1),
+                      hash_value TEXT,
+                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
         conn.commit()
         conn.close()
-        print("💾 Таблица подписчиков инициализирована")
+        print("💾 База данных инициализирована")
+        
+        # Загружаем сохранённый хеш
+        load_previous_hash()
+        
     except Exception as e:
-        print(f"❌ Ошибка при создании таблицы подписчиков: {e}")
+        print(f"❌ Ошибка при инициализации БД: {e}")
+
+def load_previous_hash():
+    """Загружает предыдущий хеш из базы данных"""
+    global previous_schedule_hash
+    try:
+        conn = sqlite3.connect('schedule.db')
+        c = conn.cursor()
+        c.execute("SELECT hash_value FROM schedule_hash WHERE id = 1")
+        result = c.fetchone()
+        if result:
+            previous_schedule_hash = result[0]
+            print(f"📋 Загружен сохранённый хеш: {previous_schedule_hash[:8]}...")
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка загрузки хеша: {e}")
+
+def save_hash(hash_value):
+    """Сохраняет хеш в базу данных"""
+    try:
+        conn = sqlite3.connect('schedule.db')
+        c = conn.cursor()
+        c.execute('''INSERT OR REPLACE INTO schedule_hash (id, hash_value, updated_at) 
+                     VALUES (1, ?, CURRENT_TIMESTAMP)''', (hash_value,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Ошибка сохранения хеша: {e}")
 
 def load_subscribers():
     """Загружает подписчиков из базы данных"""
@@ -103,6 +139,7 @@ def load_subscribers():
     try:
         conn = sqlite3.connect('schedule.db')
         c = conn.cursor()
+        # Загружаем из таблицы subscribers
         c.execute("SELECT user_id FROM subscribers")
         rows = c.fetchall()
         with subscribers_lock:
@@ -118,6 +155,8 @@ def save_subscriber(user_id):
         conn = sqlite3.connect('schedule.db')
         c = conn.cursor()
         c.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (user_id,))
+        # Также обновляем в таблице users
+        c.execute("UPDATE users SET subscribed = 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -129,13 +168,15 @@ def remove_subscriber(user_id):
         conn = sqlite3.connect('schedule.db')
         c = conn.cursor()
         c.execute("DELETE FROM subscribers WHERE user_id = ?", (user_id,))
+        # Также обновляем в таблице users
+        c.execute("UPDATE users SET subscribed = 0 WHERE user_id = ?", (user_id,))
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"❌ Ошибка удаления подписчика: {e}")
 
-# Инициализируем таблицу подписчиков и загружаем их
-init_subscribers_db()
+# Инициализируем базу данных и загружаем подписчиков
+init_db()
 load_subscribers()
 
 # ---------- ПЛАНИРОВЩИК ДЛЯ ПРОВЕРКИ РАСПИСАНИЯ ----------
@@ -195,6 +236,13 @@ def notify_all_users():
             time.sleep(0.05)
         except Exception as e:
             print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+            # Если пользователь заблокировал бота, удаляем его из подписчиков
+            if "Forbidden: bot was blocked by the user" in str(e):
+                with subscribers_lock:
+                    if user_id in subscribed_users:
+                        subscribed_users.remove(user_id)
+                remove_subscriber(user_id)
+                print(f"🗑️ Пользователь {user_id} удалён из подписчиков (заблокировал бота)")
             failed += 1
     
     print(f"📨 Уведомления: {success} отправлено, {failed} ошибок")
@@ -216,9 +264,14 @@ def check_schedule_updates():
         if previous_schedule_hash and current_hash != previous_schedule_hash:
             print("✅ ИЗМЕНЕНИЯ ОБНАРУЖЕНЫ!")
             
+            # Сохраняем новый хеш в базу
+            save_hash(current_hash)
+            
             # Отправляем уведомления всем подписчикам
             if NOTIFICATIONS_ENABLED:
                 notify_all_users()
+        else:
+            print("ℹ️ Изменений нет")
         
         previous_schedule_hash = current_hash
         print(f"✅ Текущий хеш: {current_hash[:8]}...")
@@ -249,7 +302,7 @@ def start_scheduler():
     
     scheduler.start()
     print("⏰ Планировщик проверки расписания запущен")
-    print("⏰ Режим работы: каждые 30 минут с 9:00 до 20:00")
+    print("⏰ Режим работы: каждые 20 минут с 9:00 до 20:00")
     print(f"👥 Уведомления будут приходить всем подписчикам")
     
     return scheduler
@@ -834,10 +887,10 @@ def show_schedule(message, period):
         print(f"📅 Завтра (вычислено): {tomorrow_str}")
         
         # Определяем день недели
-        today = now.weekday()
+        today_weekday = now.weekday()
         
         if period == 'today':
-            target_day = today
+            target_day = today_weekday
             period_name = "СЕГОДНЯ"
             target_date = today_str
             
@@ -868,7 +921,7 @@ def show_schedule(message, period):
             text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
             
         elif period == 'tomorrow':
-            target_day = (today + 1) % 7
+            target_day = (today_weekday + 1) % 7
             period_name = "ЗАВТРА"
             target_date = tomorrow_str
             
@@ -897,7 +950,7 @@ def show_schedule(message, period):
             
         else:  # week
             # Для недели показываем всё расписание
-            text = format_schedule_with_day(schedule, group, today, "НА БЛИЖАЙШИЕ ДНИ")
+            text = format_schedule_with_day(schedule, group, today_weekday, "НА БЛИЖАЙШИЕ ДНИ")
         
         try:
             bot.edit_message_text(text, message.chat.id, msg.message_id, parse_mode='HTML')
