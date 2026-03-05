@@ -3,3 +3,4 @@ requests
 beautifulsoup4
 python-dotenv
 flask
+packages = ['pytelegrambotapi', 'requests', 'beautifulsoup4', 'python-dotenv', 'flask', 'apscheduler', 'psycopg2-binary']
