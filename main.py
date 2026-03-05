@@ -3,15 +3,16 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 import time
-import sqlite3
 import hashlib
 import json
 from threading import Lock
+import psycopg2
+import psycopg2.extras
 
 # Сначала устанавливаем библиотеки
 print("🔄 Проверка и установка библиотек...")
 
-packages = ['pytelegrambotapi', 'requests', 'beautifulsoup4', 'python-dotenv', 'flask', 'apscheduler']
+packages = ['pytelegrambotapi', 'requests', 'beautifulsoup4', 'python-dotenv', 'flask', 'apscheduler', 'psycopg2-binary']
 for package in packages:
     try:
         __import__(package.replace('-', '_'))
@@ -55,10 +56,16 @@ def keep_alive():
 # ---------- Загружаем токен ----------
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 if not BOT_TOKEN:
     print("❌ ОШИБКА: Не найден токен в файле .env")
     print("Создай файл .env и добавь строку: BOT_TOKEN=твой_токен")
+    sys.exit(1)
+
+if not DATABASE_URL:
+    print("❌ ОШИБКА: Не найден DATABASE_URL")
+    print("Добавь переменную окружения DATABASE_URL в настройках Render")
     sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -71,37 +78,43 @@ NOTIFICATIONS_ENABLED = True  # True - уведомления для всех п
 subscribed_users = set()  # Множество подписчиков
 subscribers_lock = Lock()  # Для безопасной работы с множеством
 
-# ---------- База данных ----------
+# ---------- База данных PostgreSQL ----------
+def get_db_connection():
+    """Создаёт подключение к базе данных"""
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
     """Создаёт все необходимые таблицы в базе данных"""
     try:
-        conn = sqlite3.connect('schedule.db')
+        conn = get_db_connection()
         c = conn.cursor()
         
         # Таблица пользователей и их групп
-        c.execute('''CREATE TABLE IF NOT EXISTS users
-                     (user_id INTEGER PRIMARY KEY, 
-                      group_name TEXT,
-                      subscribed INTEGER DEFAULT 0,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+                     user_id BIGINT PRIMARY KEY, 
+                     group_name TEXT,
+                     subscribed INTEGER DEFAULT 0,
+                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
-        # Таблица подписчиков (для обратной совместимости)
-        c.execute('''CREATE TABLE IF NOT EXISTS subscribers
-                     (user_id INTEGER PRIMARY KEY,
-                      subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        # Таблица подписчиков
+        c.execute('''CREATE TABLE IF NOT EXISTS subscribers (
+                     user_id BIGINT PRIMARY KEY,
+                     subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
-        # Таблица для хранения последнего расписания (чтобы не терять хеш при перезапуске)
-        c.execute('''CREATE TABLE IF NOT EXISTS schedule_hash
-                     (id INTEGER PRIMARY KEY CHECK (id = 1),
-                      hash_value TEXT,
-                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        # Таблица для хранения последнего расписания
+        c.execute('''CREATE TABLE IF NOT EXISTS schedule_hash (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     hash_value TEXT,
+                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
         conn.commit()
         conn.close()
-        print("💾 База данных инициализирована")
+        print("💾 База данных PostgreSQL инициализирована")
         
         # Загружаем сохранённый хеш
         load_previous_hash()
+        # Загружаем подписчиков
+        load_subscribers()
         
     except Exception as e:
         print(f"❌ Ошибка при инициализации БД: {e}")
@@ -110,7 +123,7 @@ def load_previous_hash():
     """Загружает предыдущий хеш из базы данных"""
     global previous_schedule_hash
     try:
-        conn = sqlite3.connect('schedule.db')
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT hash_value FROM schedule_hash WHERE id = 1")
         result = c.fetchone()
@@ -124,10 +137,13 @@ def load_previous_hash():
 def save_hash(hash_value):
     """Сохраняет хеш в базу данных"""
     try:
-        conn = sqlite3.connect('schedule.db')
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute('''INSERT OR REPLACE INTO schedule_hash (id, hash_value, updated_at) 
-                     VALUES (1, ?, CURRENT_TIMESTAMP)''', (hash_value,))
+        c.execute('''INSERT INTO schedule_hash (id, hash_value, updated_at) 
+                     VALUES (1, %s, CURRENT_TIMESTAMP)
+                     ON CONFLICT (id) DO UPDATE SET 
+                     hash_value = EXCLUDED.hash_value,
+                     updated_at = CURRENT_TIMESTAMP''', (hash_value,))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -137,9 +153,8 @@ def load_subscribers():
     """Загружает подписчиков из базы данных"""
     global subscribed_users
     try:
-        conn = sqlite3.connect('schedule.db')
+        conn = get_db_connection()
         c = conn.cursor()
-        # Загружаем из таблицы subscribers
         c.execute("SELECT user_id FROM subscribers")
         rows = c.fetchall()
         with subscribers_lock:
@@ -152,32 +167,66 @@ def load_subscribers():
 def save_subscriber(user_id):
     """Сохраняет подписчика в базу данных"""
     try:
-        conn = sqlite3.connect('schedule.db')
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT OR IGNORE INTO subscribers (user_id) VALUES (?)", (user_id,))
-        # Также обновляем в таблице users
-        c.execute("UPDATE users SET subscribed = 1 WHERE user_id = ?", (user_id,))
+        c.execute("INSERT INTO subscribers (user_id) VALUES (%s) ON CONFLICT DO NOTHING", (user_id,))
+        c.execute("UPDATE users SET subscribed = 1 WHERE user_id = %s", (user_id,))
         conn.commit()
         conn.close()
+        # Обновляем множество в памяти
+        with subscribers_lock:
+            subscribed_users.add(user_id)
     except Exception as e:
         print(f"❌ Ошибка сохранения подписчика: {e}")
 
 def remove_subscriber(user_id):
     """Удаляет подписчика из базы данных"""
     try:
-        conn = sqlite3.connect('schedule.db')
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("DELETE FROM subscribers WHERE user_id = ?", (user_id,))
-        # Также обновляем в таблице users
-        c.execute("UPDATE users SET subscribed = 0 WHERE user_id = ?", (user_id,))
+        c.execute("DELETE FROM subscribers WHERE user_id = %s", (user_id,))
+        c.execute("UPDATE users SET subscribed = 0 WHERE user_id = %s", (user_id,))
         conn.commit()
         conn.close()
+        # Обновляем множество в памяти
+        with subscribers_lock:
+            if user_id in subscribed_users:
+                subscribed_users.remove(user_id)
     except Exception as e:
         print(f"❌ Ошибка удаления подписчика: {e}")
 
-# Инициализируем базу данных и загружаем подписчиков
+def save_user_group(user_id, group_name):
+    """Сохраняет группу пользователя"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''INSERT INTO users (user_id, group_name) 
+                     VALUES (%s, %s) 
+                     ON CONFLICT (user_id) DO UPDATE SET 
+                     group_name = EXCLUDED.group_name''', 
+                     (user_id, group_name))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка сохранения группы: {e}")
+        return False
+
+def get_user_group(user_id):
+    """Получает группу пользователя"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT group_name FROM users WHERE user_id = %s", (user_id,))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        print(f"❌ Ошибка получения группы: {e}")
+        return None
+
+# Инициализируем базу данных
 init_db()
-load_subscribers()
 
 # ---------- ПЛАНИРОВЩИК ДЛЯ ПРОВЕРКИ РАСПИСАНИЯ ----------
 previous_schedule_hash = None
@@ -192,7 +241,7 @@ def get_all_groups_schedule():
         try:
             schedule = get_schedule_from_site(group)
             all_schedule.extend(schedule)
-            time.sleep(0.5)  # Небольшая задержка, чтобы не нагружать сайт
+            time.sleep(0.5)
         except Exception as e:
             print(f"❌ Ошибка при проверке группы {group}: {e}")
     
@@ -202,7 +251,6 @@ def get_schedule_hash():
     """Получает хеш текущего расписания для сравнения"""
     try:
         all_schedule = get_all_groups_schedule()
-        # Создаем хеш от всего расписания
         schedule_str = json.dumps(all_schedule, sort_keys=True, ensure_ascii=False)
         return hashlib.md5(schedule_str.encode('utf-8')).hexdigest()
     except Exception as e:
@@ -236,13 +284,9 @@ def notify_all_users():
             time.sleep(0.05)
         except Exception as e:
             print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
-            # Если пользователь заблокировал бота, удаляем его из подписчиков
             if "Forbidden: bot was blocked by the user" in str(e):
-                with subscribers_lock:
-                    if user_id in subscribed_users:
-                        subscribed_users.remove(user_id)
                 remove_subscriber(user_id)
-                print(f"🗑️ Пользователь {user_id} удалён из подписчиков (заблокировал бота)")
+                print(f"🗑️ Пользователь {user_id} удалён из подписчиков")
             failed += 1
     
     print(f"📨 Уведомления: {success} отправлено, {failed} ошибок")
@@ -263,11 +307,8 @@ def check_schedule_updates():
         
         if previous_schedule_hash and current_hash != previous_schedule_hash:
             print("✅ ИЗМЕНЕНИЯ ОБНАРУЖЕНЫ!")
-            
-            # Сохраняем новый хеш в базу
             save_hash(current_hash)
             
-            # Отправляем уведомления всем подписчикам
             if NOTIFICATIONS_ENABLED:
                 notify_all_users()
         else:
@@ -285,7 +326,6 @@ def start_scheduler():
     """Запускает планировщик проверки расписания"""
     scheduler = BackgroundScheduler()
     
-    # Проверка каждые 20 минут с 9 до 20 часов
     scheduler.add_job(
         check_schedule_updates,
         trigger=CronTrigger(minute='*/20', hour='9-20'),
@@ -293,7 +333,6 @@ def start_scheduler():
         replace_existing=True
     )
     
-    # Проверка при запуске
     scheduler.add_job(
         check_schedule_updates,
         trigger='date',
@@ -309,22 +348,13 @@ def start_scheduler():
 
 # ---------- РАСПИСАНИЕ ЗВОНКОВ ----------
 def get_bell_schedule(day_of_week):
-    """
-    Возвращает расписание звонков для указанного дня недели
-    day_of_week: 0-6 (понедельник-воскресенье)
-    """
+    """Возвращает расписание звонков для указанного дня недели"""
     days = {
-        0: "ПОНЕДЕЛЬНИК",
-        1: "ВТОРНИК",
-        2: "СРЕДА",
-        3: "ЧЕТВЕРГ",
-        4: "ПЯТНИЦА",
-        5: "СУББОТА",
-        6: "ВОСКРЕСЕНЬЕ"
+        0: "ПОНЕДЕЛЬНИК", 1: "ВТОРНИК", 2: "СРЕДА", 3: "ЧЕТВЕРГ",
+        4: "ПЯТНИЦА", 5: "СУББОТА", 6: "ВОСКРЕСЕНЬЕ"
     }
-
     day_name = days.get(day_of_week, "")
-
+    
     # Расписание для понедельника, среды, пятницы
     mon_wed_fri = [
         ("1 пара", "8.00 – 8.45", "8.55 – 9.40"),
@@ -334,7 +364,7 @@ def get_bell_schedule(day_of_week):
         ("5 пара", "16.00 – 16.45", "16.55 – 17.40"),
         ("6 пара", "17.50 – 18.35", "18.45 – 19.30")
     ]
-
+    
     # Расписание для вторника
     tuesday = [
         ("1 пара", "8.00 – 8.45", "8.55 – 9.40"),
@@ -344,7 +374,7 @@ def get_bell_schedule(day_of_week):
         ("5 пара", "16.55 – 17.40", "17.50 – 18.35"),
         ("6 пара", "18.45 – 19.30", "19.40 – 20.25")
     ]
-
+    
     # Расписание для четверга
     thursday = [
         ("1 пара", "8.00 – 8.45", "8.55 – 9.40"),
@@ -354,7 +384,7 @@ def get_bell_schedule(day_of_week):
         ("5 пара", "16.35 – 17.20", "17.30 – 18.15"),
         ("6 пара", "18.25 – 19.10", "19.20 – 20.05")
     ]
-
+    
     # Расписание для субботы
     saturday = [
         ("1 пара", "8.00 – 8.45", "8.55 – 9.40"),
@@ -363,34 +393,28 @@ def get_bell_schedule(day_of_week):
         ("4 пара", "13.35 – 14.20", "14.30 – 15.15"),
         ("5 пара", "15.25 – 16.10", "16.20 – 17.05")
     ]
-
-    if day_of_week in [0, 2, 4]:  # ПН, СР, ПТ
+    
+    if day_of_week in [0, 2, 4]:
         schedule = mon_wed_fri
         special = ""
-    elif day_of_week == 1:  # ВТ
+    elif day_of_week == 1:
         schedule = tuesday
         special = "\n⏰ <b>Классный час:</b> 14.10 – 14.55\n"
-    elif day_of_week == 3:  # ЧТ
+    elif day_of_week == 3:
         schedule = thursday
         special = "\n⏰ <b>Часы информации:</b> 14.10 – 14.35\n"
-    elif day_of_week == 5:  # СБ
+    elif day_of_week == 5:
         schedule = saturday
         special = ""
-    else:  # ВС - нет занятий
+    else:
         return "🎉 Воскресенье - выходной день!"
-
-    # Форматируем расписание
-    text = f"🔔 <b>РАСПИСАНИЕ ЗВОНКОВ</b>\n📅 <b>{day_name}</b>\n"
-    text += "══════════════════════\n\n"
-
+    
+    text = f"🔔 <b>РАСПИСАНИЕ ЗВОНКОВ</b>\n📅 <b>{day_name}</b>\n══════════════════════\n\n"
+    
     for lesson, first, second in schedule:
-        text += f"<b>{lesson}:</b>\n"
-        text += f"  ⏱️ <b>{first}</b> (1 подгруппа)\n"
-        text += f"  ⏱️ <b>{second}</b> (2 подгруппа)\n\n"
-
-    text += special
-    text += "══════════════════════"
-
+        text += f"<b>{lesson}:</b>\n  ⏱️ <b>{first}</b> (1 подгруппа)\n  ⏱️ <b>{second}</b> (2 подгруппа)\n\n"
+    
+    text += special + "══════════════════════"
     return text
 
 # ---------- Парсинг расписания занятий (ВСЕ СТРАНИЦЫ) ----------
@@ -405,30 +429,25 @@ def get_schedule_from_site(group_name):
     
     all_schedule_items = []
     page = 0
-    limit = 20  # Сколько записей на странице
+    limit = 20
     
     try:
         while True:
-            # Формируем URL с параметрами пагинации
             url = f"{base_url}?limitstart={page * limit}"
-            
             print(f"🔄 Загружаю страницу {page + 1}...")
             response = requests.get(url, headers=headers, timeout=15)
             response.encoding = 'utf-8'
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Ищем таблицу
             table = soup.find('table')
             if not table:
                 print(f"❌ На странице {page + 1} нет таблицы")
                 break
             
-            # Парсим строки таблицы
-            rows = table.find_all('tr')[1:]  # пропускаем заголовок
+            rows = table.find_all('tr')[1:]
             print(f"📊 Страница {page + 1}: найдено {len(rows)} строк")
             
             if not rows:
-                print(f"✅ Достигнут конец данных")
                 break
             
             page_items = 0
@@ -454,142 +473,75 @@ def get_schedule_from_site(group_name):
             
             print(f"✅ Страница {page + 1}: найдено {page_items} занятий для группы {group_name}")
             
-            # Проверяем, есть ли следующая страница
-            next_link = soup.find('a', title='Вперед')
+            next_link = soup.find('a', title='Вперед') or soup.find('a', class_='next')
             if not next_link:
-                next_link = soup.find('a', class_='next')
-            if not next_link:
-                next_link = soup.find('a', text=lambda t: t and ('далее' in t.lower() or 'next' in t.lower() or '>' in t))
-            
-            if not next_link:
-                print("✅ Это последняя страница")
                 break
             
             page += 1
-            time.sleep(1)  # Задержка, чтобы не нагружать сайт
+            time.sleep(1)
             
         print(f"🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
         return all_schedule_items
         
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Ошибка запроса: {e}")
-        return []
     except Exception as e:
-        print(f"❌ Неизвестная ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Ошибка: {e}")
         return []
 
 def get_lesson_time(lesson_num, day_of_week):
-    """
-    Возвращает время начала и конца пары по номеру и дню недели
-    """
-    # ПН, СР, ПТ
-    mon_wed_fri = {
-        1: "8.00 – 9.40",
-        2: "9.50 – 11.45",
-        3: "12.20 – 14.00",
-        4: "14.10 – 15.50",
-        5: "16.00 – 17.40",
-        6: "17.50 – 19.30"
-    }
-
-    # ВТ
-    tuesday = {
-        1: "8.00 – 9.40",
-        2: "9.50 – 11.45",
-        3: "12.20 – 14.00",
-        4: "15.05 – 16.45",
-        5: "16.55 – 18.35",
-        6: "18.45 – 20.25"
-    }
-
-    # ЧТ
-    thursday = {
-        1: "8.00 – 9.40",
-        2: "9.50 – 11.45",
-        3: "12.20 – 14.00",
-        4: "14.45 – 16.25",
-        5: "16.35 – 18.15",
-        6: "18.25 – 20.05"
-    }
-
-    # СБ
-    saturday = {
-        1: "8.00 – 9.40",
-        2: "9.50 – 11.30",
-        3: "11.50 – 13.25",
-        4: "13.35 – 15.15",
-        5: "15.25 – 17.05"
-    }
-
-    if day_of_week in [0, 2, 4]:  # ПН, СР, ПТ
+    """Возвращает время начала и конца пары"""
+    mon_wed_fri = {1: "8.00 – 9.40", 2: "9.50 – 11.45", 3: "12.20 – 14.00",
+                   4: "14.10 – 15.50", 5: "16.00 – 17.40", 6: "17.50 – 19.30"}
+    tuesday = {1: "8.00 – 9.40", 2: "9.50 – 11.45", 3: "12.20 – 14.00",
+               4: "15.05 – 16.45", 5: "16.55 – 18.35", 6: "18.45 – 20.25"}
+    thursday = {1: "8.00 – 9.40", 2: "9.50 – 11.45", 3: "12.20 – 14.00",
+                4: "14.45 – 16.25", 5: "16.35 – 18.15", 6: "18.25 – 20.05"}
+    saturday = {1: "8.00 – 9.40", 2: "9.50 – 11.30", 3: "11.50 – 13.25",
+                4: "13.35 – 15.15", 5: "15.25 – 17.05"}
+    
+    if day_of_week in [0, 2, 4]:
         return mon_wed_fri.get(lesson_num)
-    elif day_of_week == 1:  # ВТ
+    elif day_of_week == 1:
         return tuesday.get(lesson_num)
-    elif day_of_week == 3:  # ЧТ
+    elif day_of_week == 3:
         return thursday.get(lesson_num)
-    elif day_of_week == 5:  # СБ
+    elif day_of_week == 5:
         return saturday.get(lesson_num)
-    else:
-        return None
+    return None
 
 def format_schedule_with_day(schedule, group_name, target_day, period_name):
-    """Форматирует расписание с учетом конкретного дня недели для времени пар"""
+    """Форматирует расписание"""
     if not schedule:
         return f"😕 Нет расписания для группы {group_name}"
     
-    # Словарь для перевода дня недели
-    days_ru = {
-        0: "ПОНЕДЕЛЬНИК",
-        1: "ВТОРНИК", 
-        2: "СРЕДА",
-        3: "ЧЕТВЕРГ",
-        4: "ПЯТНИЦА",
-        5: "СУББОТА",
-        6: "ВОСКРЕСЕНЬЕ"
-    }
+    days_ru = {0: "ПОНЕДЕЛЬНИК", 1: "ВТОРНИК", 2: "СРЕДА", 3: "ЧЕТВЕРГ",
+               4: "ПЯТНИЦА", 5: "СУББОТА", 6: "ВОСКРЕСЕНЬЕ"}
     
-    text = f"📚 <b>РАСПИСАНИЕ {period_name}</b>\n"
-    text += f"👥 <b>Группа {group_name}</b>\n"
+    text = f"📚 <b>РАСПИСАНИЕ {period_name}</b>\n👥 <b>Группа {group_name}</b>\n"
     if period_name in ["СЕГОДНЯ", "ЗАВТРА"]:
         text += f"📅 <b>{days_ru[target_day]}</b>\n"
     text += "══════════════════════\n"
     
-    # Группируем по датам
     dates = {}
     for item in schedule:
         if item['date'] not in dates:
             dates[item['date']] = []
         dates[item['date']].append(item)
     
-    # Сортируем даты
     total_count = 0
-    
     for date in sorted(dates.keys()):
-        text += f"\n📅 <b>{date}</b>\n"
-        text += "──────────────────\n"
-        
-        # Сортируем по номеру пары
+        text += f"\n📅 <b>{date}</b>\n──────────────────\n"
         sorted_items = sorted(dates[date], key=lambda x: int(x['lesson_num']) if x['lesson_num'].isdigit() else 0)
         
         for item in sorted_items:
             total_count += 1
-            text += f"<b>{item['lesson_num']} пара:</b>\n"
-            text += f"📖 <b>{item['subject']}</b>\n"
-            text += f"👨‍🏫 {item['teacher']}\n"
-            text += f"🚪 Кабинет: {item['room']}\n"
-            
+            text += f"<b>{item['lesson_num']} пара:</b>\n📖 <b>{item['subject']}</b>\n👨‍🏫 {item['teacher']}\n🚪 Кабинет: {item['room']}\n"
             if item['lesson_num'].isdigit():
                 lesson_time = get_lesson_time(int(item['lesson_num']), target_day)
                 if lesson_time:
                     text += f"⏱️ {lesson_time}\n"
-            
             text += "\n"
     
-    text += "══════════════════════\n"
-    text += f"📊 <b>Всего пар:</b> {total_count}"
-    
+    text += f"══════════════════════\n📊 <b>Всего пар:</b> {total_count}"
     return text
 
 # ---------- Команды бота ----------
@@ -606,9 +558,7 @@ def show_subscription_menu(message):
     
     bot.send_message(
         message.chat.id,
-        f"📢 <b>Управление подпиской</b>\n\n"
-        f"Текущий статус: {status}\n\n"
-        f"🔔 При изменении расписания ты будешь получать уведомление.",
+        f"📢 <b>Управление подпиской</b>\n\nТекущий статус: {status}\n\n🔔 При изменении расписания ты будешь получать уведомление.",
         parse_mode='HTML',
         reply_markup=markup
     )
@@ -618,103 +568,47 @@ def start(message):
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add('📅 Сегодня', '📆 Завтра', '📚 Неделя')
     markup.add('🔔 Звонки', 'ℹ️ Помощь', '📢 Подписка')
-
+    
     welcome_text = (
         "👋 <b>Привет! Я бот расписания БТК</b>\n\n"
-        "📌 <b>Что я умею:</b>\n"
-        "• Показывать расписание занятий\n"
-        "• Показывать расписание звонков\n"
-        "• Сохранять твою группу\n"
-        "• Уведомлять об изменениях в расписании (кнопка 📢 Подписка)\n\n"
-        "📝 <b>Как пользоваться:</b>\n"
-        "1. Отправь номер группы (например, 301)\n"
-        "2. Нажимай кнопки для просмотра\n\n"
-        "🎯 <b>Кнопки:</b>\n"
-        "📅 Сегодня - расписание на сегодня\n"
-        "📆 Завтра - расписание на завтра\n"
-        "📚 Неделя - всё расписание\n"
-        "🔔 Звонки - расписание звонков\n"
-        "📢 Подписка - уведомления об изменениях"
+        "📌 <b>Что я умею:</b>\n• Показывать расписание занятий\n• Показывать расписание звонков\n• Сохранять твою группу\n• Уведомлять об изменениях в расписании (кнопка 📢 Подписка)\n\n"
+        "📝 <b>Как пользоваться:</b>\n1. Отправь номер группы (например, 301)\n2. Нажимай кнопки для просмотра\n\n"
+        "🎯 <b>Кнопки:</b>\n📅 Сегодня - расписание на сегодня\n📆 Завтра - расписание на завтра\n📚 Неделя - всё расписание\n🔔 Звонки - расписание звонков\n📢 Подписка - уведомления об изменениях"
     )
-
-    bot.send_message(
-        message.chat.id,
-        welcome_text,
-        parse_mode='HTML',
-        reply_markup=markup
-    )
+    
+    bot.send_message(message.chat.id, welcome_text, parse_mode='HTML', reply_markup=markup)
 
 @bot.message_handler(commands=['subscribe'])
 def subscribe(message):
-    """Подписка на уведомления"""
     user_id = message.chat.id
-    
     with subscribers_lock:
         if user_id in subscribed_users:
-            bot.send_message(
-                user_id,
-                "ℹ️ Ты уже подписан на уведомления!",
-                parse_mode='HTML'
-            )
+            bot.send_message(user_id, "ℹ️ Ты уже подписан на уведомления!", parse_mode='HTML')
             return
-        
-        subscribed_users.add(user_id)
-    
     save_subscriber(user_id)
-    
-    bot.send_message(
-        user_id,
-        "✅ <b>Ты подписан на уведомления!</b>\n\n"
-        "Я буду присылать сообщение, когда расписание обновится.\n",
-        parse_mode='HTML'
-    )
+    bot.send_message(user_id, "✅ <b>Ты подписан на уведомления!</b>\n\nЯ буду присылать сообщение, когда расписание обновится.\n", parse_mode='HTML')
 
 @bot.message_handler(commands=['unsubscribe'])
 def unsubscribe(message):
-    """Отписка от уведомлений"""
     user_id = message.chat.id
-    
     with subscribers_lock:
         if user_id not in subscribed_users:
-            bot.send_message(
-                user_id,
-                "ℹ️ Ты не подписан на уведомления.",
-                parse_mode='HTML'
-            )
+            bot.send_message(user_id, "ℹ️ Ты не подписан на уведомления.", parse_mode='HTML')
             return
-        
-        subscribed_users.remove(user_id)
-    
     remove_subscriber(user_id)
-    
-    bot.send_message(
-        user_id,
-        "❌ <b>Ты отписан от уведомлений.</b>\n\n"
-        "Если захочешь снова подписаться, нажми /subscribe",
-        parse_mode='HTML'
-    )
+    bot.send_message(user_id, "❌ <b>Ты отписан от уведомлений.</b>\n\nЕсли захочешь снова подписаться, нажми /subscribe", parse_mode='HTML')
 
 @bot.message_handler(commands=['stats'])
 def stats(message):
-    """Статистика подписчиков (только для админа)"""
     if message.chat.id != YOUR_USER_ID:
         bot.send_message(message.chat.id, "❌ Эта команда только для администратора")
         return
-    
     with subscribers_lock:
         count = len(subscribed_users)
-    
-    bot.send_message(
-        message.chat.id,
-        f"📊 <b>Статистика</b>\n\n"
-        f"👥 Подписчиков: {count}\n"
-        f"🔔 Уведомления: {'ВКЛЮЧЕНЫ' if NOTIFICATIONS_ENABLED else 'ВЫКЛЮЧЕНЫ'}",
-        parse_mode='HTML'
-    )
+    bot.send_message(message.chat.id, f"📊 <b>Статистика</b>\n\n👥 Подписчиков: {count}\n🔔 Уведомления: {'ВКЛЮЧЕНЫ' if NOTIFICATIONS_ENABLED else 'ВЫКЛЮЧЕНЫ'}", parse_mode='HTML')
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
-    """Обработчик нажатий на инлайн-кнопки"""
     user_id = call.message.chat.id
     
     if call.data == 'subscribe':
@@ -722,8 +616,6 @@ def callback_handler(call):
             if user_id in subscribed_users:
                 bot.answer_callback_query(call.id, "✅ Ты уже подписан!")
                 return
-            subscribed_users.add(user_id)
-        
         save_subscriber(user_id)
         bot.answer_callback_query(call.id, "✅ Ты подписан!")
         
@@ -732,8 +624,6 @@ def callback_handler(call):
             if user_id not in subscribed_users:
                 bot.answer_callback_query(call.id, "❌ Ты не подписан")
                 return
-            subscribed_users.remove(user_id)
-        
         remove_subscriber(user_id)
         bot.answer_callback_query(call.id, "❌ Ты отписался")
         
@@ -742,15 +632,12 @@ def callback_handler(call):
             status = "✅ Подписан" if user_id in subscribed_users else "❌ Не подписан"
         bot.answer_callback_query(call.id, status)
     
-    # Обновляем сообщение с меню
     with subscribers_lock:
         status = "✅ Подписан" if user_id in subscribed_users else "❌ Не подписан"
     
     try:
         bot.edit_message_text(
-            f"📢 <b>Управление подпиской</b>\n\n"
-            f"Текущий статус: {status}\n\n"
-            f"🔔 При изменении расписания ты будешь получать уведомление.",
+            f"📢 <b>Управление подпиской</b>\n\nТекущий статус: {status}\n\n🔔 При изменении расписания ты будешь получать уведомление.",
             call.message.chat.id,
             call.message.message_id,
             parse_mode='HTML',
@@ -762,7 +649,8 @@ def callback_handler(call):
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     text = message.text
-
+    user_id = message.chat.id
+    
     if text == '📅 Сегодня':
         show_schedule(message, 'today')
     elif text == '📆 Завтра':
@@ -776,224 +664,102 @@ def handle_message(message):
     elif text == '📢 Подписка':
         show_subscription_menu(message)
     else:
-        # Сохраняем группу
-        try:
-            conn = sqlite3.connect('schedule.db')
-            c = conn.cursor()
-            c.execute("INSERT OR REPLACE INTO users (user_id, group_name) VALUES (?, ?)",
-                      (message.chat.id, text))
-            conn.commit()
-            conn.close()
-
-            bot.send_message(
-                message.chat.id,
-                f"✅ <b>Группа {text} сохранена!</b>\n\nТеперь нажимай кнопки для просмотра расписания",
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            bot.send_message(message.chat.id, "❌ Ошибка при сохранении группы")
-            print(f"Ошибка БД: {e}")
+        if save_user_group(user_id, text):
+            bot.send_message(user_id, f"✅ <b>Группа {text} сохранена!</b>\n\nТеперь нажимай кнопки для просмотра расписания", parse_mode='HTML')
+        else:
+            bot.send_message(user_id, "❌ Ошибка при сохранении группы")
 
 def show_bell_schedule(message):
-    """Показывает расписание звонков"""
     today = datetime.now().weekday()
-
-    # Получаем расписание на сегодня
     bell_text = get_bell_schedule(today)
-
-    # Добавляем информацию о завтрашнем дне
     tomorrow = (today + 1) % 7
     tomorrow_name = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"][tomorrow]
-
-    full_text = (
-        f"{bell_text}\n\n"
-        f"📌 <b>Завтра ({tomorrow_name}):</b>\n"
-        f"Используй кнопку 📆 Завтра для расписания занятий"
-    )
-
+    full_text = f"{bell_text}\n\n📌 <b>Завтра ({tomorrow_name}):</b>\nИспользуй кнопку 📆 Завтра для расписания занятий"
     bot.send_message(message.chat.id, full_text, parse_mode='HTML')
 
 def show_help(message):
     help_text = (
         "ℹ️ <b>ПОМОЩЬ ПО БОТУ</b>\n\n"
-        "📌 <b>Основные команды:</b>\n"
-        "• <b>Отправь номер группы</b> - сохранить группу\n"
-        "• <b>📅 Сегодня</b> - расписание на сегодня\n"
-        "• <b>📆 Завтра</b> - расписание на завтра\n"
-        "• <b>📚 Неделя</b> - всё расписание\n"
-        "• <b>🔔 Звонки</b> - расписание звонков\n"
-        "• <b>📢 Подписка</b> - уведомления об изменениях\n"
-        "• <b>/subscribe</b> - подписаться\n"
-        "• <b>/unsubscribe</b> - отписаться\n\n"
-        "❓ <b>Если бот не отвечает:</b>\n"
-        "• Проверь, сохранена ли группа\n"
-        "• Попробуй нажать /start\n"
-        "• Напиши позже, если сайт колледжа недоступен\n\n"
-        "🛠️ <b>Разработчик:</b> Михась"
+        "📌 <b>Основные команды:</b>\n• <b>Отправь номер группы</b> - сохранить группу\n• <b>📅 Сегодня</b> - расписание на сегодня\n• <b>📆 Завтра</b> - расписание на завтра\n• <b>📚 Неделя</b> - всё расписание\n• <b>🔔 Звонки</b> - расписание звонков\n• <b>📢 Подписка</b> - уведомления об изменениях\n• <b>/subscribe</b> - подписаться\n• <b>/unsubscribe</b> - отписаться\n\n"
+        "❓ <b>Если бот не отвечает:</b>\n• Проверь, сохранена ли группа\n• Попробуй нажать /start\n• Напиши позже, если сайт колледжа недоступен\n\n🛠️ <b>Разработчик:</b> Михась"
     )
     bot.send_message(message.chat.id, help_text, parse_mode='HTML')
 
 def show_schedule(message, period):
-    # Устанавливаем часовой пояс для корректной даты
-    os.environ['TZ'] = 'Europe/Minsk'
-    try:
-        time.tzset()
-    except:
-        pass
+    user_id = message.chat.id
+    group = get_user_group(user_id)
     
-    # Получаем группу пользователя
-    try:
-        conn = sqlite3.connect('schedule.db')
-        c = conn.cursor()
-        c.execute("SELECT group_name FROM users WHERE user_id = ?", (message.chat.id,))
-        result = c.fetchone()
-        conn.close()
-    except Exception as e:
-        bot.send_message(message.chat.id, "❌ Ошибка при получении данных")
-        print(f"Ошибка БД: {e}")
+    if not group:
+        bot.send_message(user_id, "❌ Сначала отправь номер группы")
         return
-
-    if not result:
-        bot.send_message(message.chat.id, "❌ Сначала отправь номер группы")
-        return
-
-    group = result[0]
-
-    msg = bot.send_message(message.chat.id, f"🔍 <b>Ищу расписание для группы {group}...</b>", parse_mode='HTML')
-
+    
+    msg = bot.send_message(user_id, f"🔍 <b>Ищу расписание для группы {group}...</b>", parse_mode='HTML')
     schedule = get_schedule_from_site(group)
-
-    if schedule:
-        print(f"\n{'='*50}")
-        print(f"📊 ВСЕГО НАЙДЕНО: {len(schedule)} занятий для группы {group}")
+    
+    if not schedule:
+        bot.edit_message_text("😕 <b>Не удалось найти расписание.</b>\n\nПроверь номер группы или попробуй позже.", user_id, msg.message_id, parse_mode='HTML')
+        return
+    
+    all_dates = sorted(set([item['date'] for item in schedule]))
+    now = datetime.now()
+    
+    months_ru = {1: 'янв', 2: 'фев', 3: 'март', 4: 'апр', 5: 'мая', 6: 'июн', 7: 'июл', 8: 'авг', 9: 'сен', 10: 'окт', 11: 'ноя', 12: 'дек'}
+    
+    today_str = f"{now.day:02d}-{months_ru[now.month]}"
+    tomorrow_str = f"{(now + timedelta(days=1)).day:02d}-{months_ru[(now + timedelta(days=1)).month]}"
+    
+    today_weekday = now.weekday()
+    
+    if period == 'today':
+        target_day, period_name, target_date = today_weekday, "СЕГОДНЯ", today_str
+        filtered_schedule = [item for item in schedule if item['date'].lower() == target_date.lower()]
         
-        # Показываем все уникальные даты в расписании
-        all_dates = sorted(set([item['date'] for item in schedule]))
-        print(f"📅 Даты в расписании: {all_dates}")
+        if not filtered_schedule:
+            bot.edit_message_text(f"😕 <b>Нет расписания на сегодня</b>\n\nДля группы {group} не найдено занятий на {target_date}.\n\n📅 <b>Доступные даты:</b>\n" + "\n".join(all_dates[:10]) + "\n\nПопробуй посмотреть всё расписание (📚 Неделя)", user_id, msg.message_id, parse_mode='HTML')
+            return
         
-        # Определяем сегодняшнюю дату
-        now = datetime.now()
+        text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
+    
+    elif period == 'tomorrow':
+        target_day, period_name, target_date = (today_weekday + 1) % 7, "ЗАВТРА", tomorrow_str
+        filtered_schedule = [item for item in schedule if item['date'].lower() == target_date.lower()]
         
-        # Словарь русских месяцев 
-        months_ru = {
-            1: 'янв', 2: 'фев', 3: 'март', 4: 'апр', 5: 'мая', 6: 'июн',
-            7: 'июл', 8: 'авг', 9: 'сен', 10: 'окт', 11: 'ноя', 12: 'дек'
-        }
+        if not filtered_schedule:
+            bot.edit_message_text(f"😕 <b>Нет расписания на завтра</b>\n\nДля группы {group} не найдено занятий на {target_date}.\n\nПопробуй посмотреть всё расписание (📚 Неделя)", user_id, msg.message_id, parse_mode='HTML')
+            return
         
-        # Формат как на сайте: с ведущим нулём и месяцем
-        today_str = f"{now.day:02d}-{months_ru[now.month]}"
-        tomorrow_str = f"{(now + timedelta(days=1)).day:02d}-{months_ru[(now + timedelta(days=1)).month]}"
-        
-        print(f"📅 Сегодня (ищем): {today_str}")
-        print(f"📅 Завтра (ищем): {tomorrow_str}")
-        
-        # Определяем день недели
-        today_weekday = now.weekday()
-        
-        if period == 'today':
-            target_day = today_weekday
-            period_name = "СЕГОДНЯ"
-            target_date = today_str
-            
-            print(f"🔍 Ищем дату: {target_date}")
-            
-            # Фильтруем только сегодняшние занятия
-            filtered_schedule = []
-            for item in schedule:
-                if item['date'].lower() == target_date.lower():
-                    filtered_schedule.append(item)
-            
-            print(f"✅ Найдено сегодня: {len(filtered_schedule)}")
-            
-            if not filtered_schedule:
-                # Показываем доступные даты
-                dates_list = "\n".join(all_dates[:10])
-                bot.edit_message_text(
-                    f"😕 <b>Нет расписания на сегодня</b>\n\n"
-                    f"Для группы {group} не найдено занятий на {target_date}.\n\n"
-                    f"📅 <b>Доступные даты:</b>\n{dates_list}\n\n"
-                    f"Попробуй посмотреть всё расписание (📚 Неделя)",
-                    message.chat.id,
-                    msg.message_id,
-                    parse_mode='HTML'
-                )
-                return
-            
-            text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
-            
-        elif period == 'tomorrow':
-            target_day = (today_weekday + 1) % 7
-            period_name = "ЗАВТРА"
-            target_date = tomorrow_str
-            
-            print(f"🔍 Ищем дату: {target_date}")
-            
-            # Фильтруем только завтрашние занятия
-            filtered_schedule = []
-            for item in schedule:
-                if item['date'].lower() == target_date.lower():
-                    filtered_schedule.append(item)
-            
-            print(f"✅ Найдено завтра: {len(filtered_schedule)}")
-            
-            if not filtered_schedule:
-                bot.edit_message_text(
-                    f"😕 <b>Нет расписания на завтра</b>\n\n"
-                    f"Для группы {group} не найдено занятий на {target_date}.\n\n"
-                    f"Попробуй посмотреть всё расписание (📚 Неделя)",
-                    message.chat.id,
-                    msg.message_id,
-                    parse_mode='HTML'
-                )
-                return
-            
-            text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
-            
-        else:  # week
-            # Для недели показываем всё расписание
-            text = format_schedule_with_day(schedule, group, today_weekday, "НА БЛИЖАЙШИЕ ДНИ")
-        
-        try:
-            bot.edit_message_text(text, message.chat.id, msg.message_id, parse_mode='HTML')
-        except Exception as e:
-            print(f"Ошибка при редактировании: {e}")
-            if len(text) > 4096:
-                for i in range(0, len(text), 4096):
-                    bot.send_message(message.chat.id, text[i:i+4096], parse_mode='HTML')
-            else:
-                bot.send_message(message.chat.id, text, parse_mode='HTML')
+        text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
+    
     else:
-        bot.edit_message_text(
-            "😕 <b>Не удалось найти расписание.</b>\n\n"
-            "Проверь номер группы или попробуй позже.\n"
-            "Возможно, сайт колледжа временно недоступен.",
-            message.chat.id,
-            msg.message_id,
-            parse_mode='HTML'
-        )
+        text = format_schedule_with_day(schedule, group, today_weekday, "НА БЛИЖАЙШИЕ ДНИ")
+    
+    try:
+        bot.edit_message_text(text, user_id, msg.message_id, parse_mode='HTML')
+    except Exception as e:
+        print(f"Ошибка при редактировании: {e}")
+        if len(text) > 4096:
+            for i in range(0, len(text), 4096):
+                bot.send_message(user_id, text[i:i+4096], parse_mode='HTML')
+        else:
+            bot.send_message(user_id, text, parse_mode='HTML')
 
 # ---------- Запуск ----------
 if __name__ == "__main__":
     print("\n" + "="*50)
     print("🚀 ЗАПУСК БОТА РАСПИСАНИЯ БТК")
     print("="*50)
-
-    # Запускаем Flask в отдельном потоке
+    
     keep_alive()
-
-    # Запускаем планировщик проверки расписания
     scheduler = start_scheduler()
-
+    
     print("✅ Бот готов к работе!")
     print("📱 Найди своего бота в Telegram и отправь /start")
     print("="*50 + "\n")
-
-    # Запускаем бота
+    
     try:
         bot.polling(non_stop=True, interval=0)
     except Exception as e:
         print(f"❌ Ошибка при запуске бота: {e}")
     finally:
-        # Останавливаем планировщик при завершении бота
         if 'scheduler' in locals():
             scheduler.shutdown()
