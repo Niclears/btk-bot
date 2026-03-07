@@ -419,66 +419,41 @@ def get_bell_schedule(day_of_week):
 
 # ---------- Парсинг расписания занятий (ВСЕ СТРАНИЦЫ) ----------
 def get_schedule_from_site(group_name):
-    """
-    Получает расписание через парсинг HTML-страницы колледжа.
-    """
-    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
+    base_url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
         'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
     }
-
+    
     all_schedule_items = []
     page = 0
-    limit = 20  # На сайте по 20 записей на страницу
-
+    limit = 20
+    
     try:
-        print(f"\n{'='*50}")
-        print(f"🔍 НАЧАЛО ПАРСИНГА для группы: {group_name}")
-        print(f"{'='*50}")
-
         while True:
-            # Формируем URL с параметром limitstart для пагинации
-            url_with_page = f"{url}?limitstart={page * limit}"
-            print(f"\n📡 Запрос страницы {page + 1}: {url_with_page}")
-
-            response = requests.get(url_with_page, headers=headers, timeout=15)
-            print(f"📊 Статус ответа: {response.status_code}")
-
-            if response.status_code != 200:
-                print(f"❌ Ошибка HTTP: {response.status_code}")
-                break
-
+            url = f"{base_url}?limitstart={page * limit}"
+            print(f"🔄 Загружаю страницу {page + 1}...")
+            
+            response = requests.get(url, headers=headers, timeout=15)
             response.encoding = 'utf-8'
-            print(f"📏 Размер страницы: {len(response.text)} символов")
-
             soup = BeautifulSoup(response.text, 'html.parser')
-
-            # Ищем таблицу по её ID или структуре
-            table = soup.find('table', id='at_107')  # У таблицы есть ID!
+            
+            # Ищем таблицу
+            table = soup.find('table')
             if not table:
-                # Если не нашли по ID, ищем любую таблицу с классом ari-tbl-row
-                table = soup.find('table', class_='display')
-                if not table:
-                    print("❌ Таблица с расписанием не найдена!")
-                    break
-
-            print("✅ Таблица найдена")
-
-            # Находим все строки таблицы
-            rows = table.find_all('tr')
-            print(f"📊 Всего строк в таблице: {len(rows)}")
-
-            if len(rows) <= 1:  # Только заголовок или пусто
-                print("✅ Строк с данными нет")
+                print(f"❌ На странице {page + 1} нет таблицы")
                 break
-
+            
+            rows = table.find_all('tr')[1:]  # пропускаем заголовок
+            print(f"📊 Страница {page + 1}: найдено {len(rows)} строк")
+            
+            if not rows:
+                break
+            
             page_items = 0
-            for row in rows[1:]:  # Пропускаем строку заголовка
+            for row in rows:
                 cells = row.find_all('td')
                 if len(cells) >= 7:
                     date = cells[0].text.strip()
@@ -487,8 +462,7 @@ def get_schedule_from_site(group_name):
                     subject = cells[3].text.strip()
                     teacher = cells[4].text.strip()
                     room = cells[5].text.strip()
-                    # sub_group = cells[6].text.strip() # Пока не используем
-
+                    
                     if group == group_name:
                         all_schedule_items.append({
                             'date': date,
@@ -498,38 +472,26 @@ def get_schedule_from_site(group_name):
                             'room': room
                         })
                         page_items += 1
-
-            print(f"✅ На странице {page + 1} найдено {page_items} занятий для группы {group_name}")
-
-            # Проверяем, есть ли следующая страница (ищем кнопку "Вперед")
-            pagination = soup.find('div', class_='dataTables_paginate')
-            if pagination:
-                next_link = pagination.find('a', class_='next')
-                if not next_link or 'disabled' in next_link.get('class', []):
-                    print("✅ Это последняя страница")
-                    break
-            else:
-                # Если пагинации нет, значит страница одна
+            
+            print(f"✅ Страница {page + 1}: найдено {page_items} занятий для группы {group_name}")
+            
+            # Проверяем следующую страницу
+            next_link = soup.find('a', title='Вперед') or soup.find('a', class_='next')
+            if not next_link:
                 break
-
+                
             page += 1
-            time.sleep(1)  # Небольшая задержка, чтобы не нагружать сайт
-
-        print(f"\n🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
-        print(f"{'='*50}\n")
+            time.sleep(1)
+        
+        print(f"🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
         return all_schedule_items
-
-    except requests.exceptions.ConnectionError as e:
-        print(f"❌ Ошибка подключения: {e}")
-        return []
-    except requests.exceptions.Timeout as e:
-        print(f"❌ Таймаут: {e}")
-        return []
+        
     except Exception as e:
-        print(f"❌ Неизвестная ошибка: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Ошибка: {e}")
         return []
+
+
+
 def get_lesson_time(lesson_num, day_of_week):
     """Возвращает время начала и конца пары"""
     mon_wed_fri = {1: "8.00 – 9.40", 2: "9.50 – 11.45", 3: "12.20 – 14.00",
