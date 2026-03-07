@@ -425,6 +425,8 @@ def get_schedule_from_site(group_name):
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
         'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
     }
     
     all_schedule_items = []
@@ -432,26 +434,45 @@ def get_schedule_from_site(group_name):
     limit = 20
     
     try:
+        print(f"\n{'='*50}")
+        print(f"🔍 НАЧАЛО ПАРСИНГА для группы: {group_name}")
+        print(f"{'='*50}")
+        
         while True:
             url = f"{base_url}?limitstart={page * limit}"
-            print(f"🔄 Загружаю страницу {page + 1}...")
+            print(f"\n📡 Запрос страницы {page + 1}: {url}")
+            
             response = requests.get(url, headers=headers, timeout=15)
+            print(f"📊 Статус ответа: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"❌ Ошибка HTTP: {response.status_code}")
+                break
+                
             response.encoding = 'utf-8'
+            print(f"📏 Размер страницы: {len(response.text)} символов")
+            
             soup = BeautifulSoup(response.text, 'html.parser')
             
+            # Ищем таблицу
             table = soup.find('table')
             if not table:
-                print(f"❌ На странице {page + 1} нет таблицы")
+                print("❌ Таблица не найдена!")
+                # Сохраним первые 500 символов страницы для анализа
+                print(f"📄 Первые 500 символов страницы:\n{response.text[:500]}")
                 break
             
-            rows = table.find_all('tr')[1:]
-            print(f"📊 Страница {page + 1}: найдено {len(rows)} строк")
+            print("✅ Таблица найдена")
+            
+            rows = table.find_all('tr')[1:]  # пропускаем заголовок
+            print(f"📊 Строк в таблице: {len(rows)}")
             
             if not rows:
+                print("✅ Строк больше нет, конец данных")
                 break
             
             page_items = 0
-            for row in rows:
+            for i, row in enumerate(rows[:5]):  # покажем первые 5 строк для отладки
                 cells = row.find_all('td')
                 if len(cells) >= 7:
                     date = cells[0].text.strip()
@@ -460,6 +481,8 @@ def get_schedule_from_site(group_name):
                     subject = cells[3].text.strip()
                     teacher = cells[4].text.strip()
                     room = cells[5].text.strip()
+                    
+                    print(f"  Строка {i+1}: {date} | {group} | {lesson_num} | {subject[:20]}...")
                     
                     if group == group_name:
                         all_schedule_items.append({
@@ -471,20 +494,31 @@ def get_schedule_from_site(group_name):
                         })
                         page_items += 1
             
-            print(f"✅ Страница {page + 1}: найдено {page_items} занятий для группы {group_name}")
+            print(f"✅ На странице {page + 1} найдено {page_items} занятий для группы {group_name}")
             
+            # Проверка следующей страницы
             next_link = soup.find('a', title='Вперед') or soup.find('a', class_='next')
             if not next_link:
+                print("✅ Это последняя страница")
                 break
             
             page += 1
             time.sleep(1)
-            
-        print(f"🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
+        
+        print(f"\n🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
+        print(f"{'='*50}\n")
         return all_schedule_items
         
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ Ошибка подключения: {e}")
+        return []
+    except requests.exceptions.Timeout as e:
+        print(f"❌ Таймаут: {e}")
+        return []
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Неизвестная ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 def get_lesson_time(lesson_num, day_of_week):
