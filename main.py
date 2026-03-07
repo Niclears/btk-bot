@@ -419,7 +419,10 @@ def get_bell_schedule(day_of_week):
 
 # ---------- Парсинг расписания занятий (ВСЕ СТРАНИЦЫ) ----------
 def get_schedule_from_site(group_name):
-    base_url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
+    """
+    Получает расписание через парсинг HTML-страницы колледжа.
+    """
+    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -428,68 +431,68 @@ def get_schedule_from_site(group_name):
     }
     
     all_schedule_items = []
-    page = 0
-    limit = 20
     
     try:
-        while True:
-            url = f"{base_url}?limitstart={page * limit}"
-            print(f"🔄 Загружаю страницу {page + 1}...")
-            
-            response = requests.get(url, headers=headers, timeout=15)
-            response.encoding = 'utf-8'
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Ищем таблицу
-            table = soup.find('table')
-            if not table:
-                print(f"❌ На странице {page + 1} нет таблицы")
-                break
-            
-            rows = table.find_all('tr')[1:]  # пропускаем заголовок
-            print(f"📊 Страница {page + 1}: найдено {len(rows)} строк")
-            
-            if not rows:
-                break
-            
-            page_items = 0
-            for row in rows:
-                cells = row.find_all('td')
-                if len(cells) >= 7:
-                    date = cells[0].text.strip()
-                    group = cells[1].text.strip()
-                    lesson_num = cells[2].text.strip()
-                    subject = cells[3].text.strip()
-                    teacher = cells[4].text.strip()
-                    room = cells[5].text.strip()
-                    
-                    if group == group_name:
-                        all_schedule_items.append({
-                            'date': date,
-                            'lesson_num': lesson_num,
-                            'subject': subject,
-                            'teacher': teacher,
-                            'room': room
-                        })
-                        page_items += 1
-            
-            print(f"✅ Страница {page + 1}: найдено {page_items} занятий для группы {group_name}")
-            
-            # Проверяем следующую страницу
-            next_link = soup.find('a', title='Вперед') or soup.find('a', class_='next')
-            if not next_link:
-                break
-                
-            page += 1
-            time.sleep(1)
+        print(f"\n{'='*50}")
+        print(f"🔍 ПАРСИНГ для группы: {group_name}")
+        print(f"{'='*50}")
         
-        print(f"🎯 ВСЕГО найдено {len(all_schedule_items)} занятий для группы {group_name}")
+        print(f"📡 Загружаю страницу...")
+        response = requests.get(url, headers=headers, timeout=15)
+        print(f"📊 Статус: {response.status_code}")
+        
+        if response.status_code != 200:
+            print("❌ Ошибка загрузки страницы")
+            return []
+            
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем таблицу по ID (как в твоём HTML)
+        table = soup.find('table', id='at_107')
+        if not table:
+            print("❌ Таблица с id='at_107' не найдена")
+            return []
+        
+        print("✅ Таблица найдена")
+        
+        # Ищем все строки с данными (у них класс ari-tbl-row-*)
+        rows = table.find_all('tr', class_=lambda x: x and x.startswith('ari-tbl-row'))
+        print(f"📊 Найдено строк с данными: {len(rows)}")
+        
+        if not rows:
+            print("❌ Нет строк с данными")
+            return []
+        
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) >= 7:
+                date = cells[0].text.strip()
+                group = cells[1].text.strip()
+                lesson_num = cells[2].text.strip()
+                subject = cells[3].text.strip()
+                teacher = cells[4].text.strip()
+                room = cells[5].text.strip()
+                
+                print(f"  Найдено: {date} | {group} | {lesson_num} | {subject[:20]}...")
+                
+                if group == group_name:
+                    all_schedule_items.append({
+                        'date': date,
+                        'lesson_num': lesson_num,
+                        'subject': subject,
+                        'teacher': teacher,
+                        'room': room
+                    })
+        
+        print(f"\n🎯 Найдено {len(all_schedule_items)} занятий для группы {group_name}")
         return all_schedule_items
         
     except Exception as e:
         print(f"❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         return []
-
 
 
 def get_lesson_time(lesson_num, day_of_week):
