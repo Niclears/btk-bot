@@ -8,6 +8,49 @@ import json
 from threading import Lock
 import psycopg2
 import psycopg2.extras
+# ---------- ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА ----------
+import os
+import sys
+import socket
+import fcntl
+import struct
+import time
+
+def single_instance_guard():
+    """
+    Гарантирует, что работает только один экземпляр бота.
+    Если бот уже запущен - новый экземпляр завершается.
+    """
+    try:
+        # Пытаемся создать lock-файл
+        lock_file = '/tmp/bot_single_instance.lock'
+        
+        # Пробуем открыть файл с эксклюзивной блокировкой
+        with open(lock_file, 'w') as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                f.write(str(os.getpid()))
+                f.flush()
+                print("✅ Защита активна: это единственный экземпляр бота")
+                
+                # Оставляем файл открытым (он будет жить пока жив бот)
+                global lock_handle
+                lock_handle = f
+                return True
+            except (IOError, OSError):
+                print("❌ Бот уже запущен в другом процессе!")
+                print("❌ Завершаю работу, чтобы избежать ошибки 409")
+                sys.exit(1)
+                
+    except Exception as e:
+        print(f"⚠️ Не удалось создать lock-файл: {e}")
+        print("⚠️ Продолжаю работу без защиты...")
+        return False
+
+# Запускаем защиту
+single_instance_guard()
+
+
 
 # Сначала устанавливаем библиотеки
 print("🔄 Проверка и установка библиотек...")
