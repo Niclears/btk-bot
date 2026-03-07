@@ -420,49 +420,51 @@ def get_bell_schedule(day_of_week):
 # ---------- Парсинг расписания занятий (ВСЕ СТРАНИЦЫ) ----------
 def get_schedule_from_site(group_name):
     """
-    Получает расписание через парсинг HTML-страницы колледжа.
+    Получает расписание через JSON API сайта (НАДЁЖНО)
     """
-    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
-        'Connection': 'keep-alive',
-    }
-    
-    all_schedule_items = []
-    
     try:
         print(f"\n{'='*50}")
-        print(f"🔍 ПАРСИНГ для группы: {group_name}")
-        print(f"{'='*50}")
+        print(f"🔍 API ЗАПРОС для группы: {group_name}")
         
-        print(f"📡 Загружаю страницу...")
-        response = requests.get(url, headers=headers, timeout=15)
+        # Прямой API запрос (я нашёл этот endpoint)
+        url = "https://www.bartc.by/index.php"
+        params = {
+            'option': 'com_ajax',
+            'module': 'aridatatables',
+            'method': 'getData',
+            'dataId': '107',  # ID таблицы at_107
+            'format': 'json'
+        }
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json',
+            'Referer': 'https://www.bartc.by/'
+        }
+        
+        print(f"📡 Запрос к API...")
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         print(f"📊 Статус: {response.status_code}")
         
         if response.status_code != 200:
-            print("❌ Ошибка загрузки страницы")
-            return []
-            
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
+            print("❌ Ошибка API")
+            return fallback_parser(group_name)
         
-        # Ищем таблицу по ID (как в твоём HTML)
-        table = soup.find('table', id='at_107')
-        if not table:
-            print("❌ Таблица с id='at_107' не найдена")
-            return []
+        # Парсим JSON
+        data = response.json()
         
-        print("✅ Таблица найдена")
+        # В данных должна быть секция с таблицей
+        if not data or 'data' not in data:
+            print("❌ Неверный формат JSON")
+            return fallback_parser(group_name)
         
-        # Ищем все строки с данными (у них класс ari-tbl-row-*)
-        rows = table.find_all('tr', class_=lambda x: x and x.startswith('ari-tbl-row'))
-        print(f"📊 Найдено строк с данными: {len(rows)}")
+        # Парсим HTML таблицы из JSON
+        html_content = data['data']
+        soup = BeautifulSoup(html_content, 'html.parser')
         
-        if not rows:
-            print("❌ Нет строк с данными")
-            return []
+        schedule_items = []
+        rows = soup.find_all('tr')[1:]  # пропускаем заголовок
         
         for row in rows:
             cells = row.find_all('td')
@@ -474,10 +476,8 @@ def get_schedule_from_site(group_name):
                 teacher = cells[4].text.strip()
                 room = cells[5].text.strip()
                 
-                print(f"  Найдено: {date} | {group} | {lesson_num} | {subject[:20]}...")
-                
                 if group == group_name:
-                    all_schedule_items.append({
+                    schedule_items.append({
                         'date': date,
                         'lesson_num': lesson_num,
                         'subject': subject,
@@ -485,15 +485,63 @@ def get_schedule_from_site(group_name):
                         'room': room
                     })
         
-        print(f"\n🎯 Найдено {len(all_schedule_items)} занятий для группы {group_name}")
-        return all_schedule_items
+        print(f"✅ Найдено {len(schedule_items)} занятий через API")
+        return schedule_items
         
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
+        print(f"❌ Ошибка API: {e}")
+        return fallback_parser(group_name)
 
+def fallback_parser(group_name):
+    """
+    Запасной вариант: прямой парсинг HTML
+    """
+    print(f"\n🔄 Запасной парсер для группы {group_name}")
+    
+    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем таблицу по ID
+        table = soup.find('table', id='at_107')
+        if not table:
+            print("❌ Таблица не найдена")
+            return []
+        
+        rows = table.find_all('tr')[1:]
+        schedule_items = []
+        
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) >= 7:
+                date = cells[0].text.strip()
+                group = cells[1].text.strip()
+                lesson_num = cells[2].text.strip()
+                subject = cells[3].text.strip()
+                teacher = cells[4].text.strip()
+                room = cells[5].text.strip()
+                
+                if group == group_name:
+                    schedule_items.append({
+                        'date': date,
+                        'lesson_num': lesson_num,
+                        'subject': subject,
+                        'teacher': teacher,
+                        'room': room
+                    })
+        
+        print(f"✅ Запасной парсер нашёл {len(schedule_items)} занятий")
+        return schedule_items
+        
+    except Exception as e:
+        print(f"❌ Ошибка запасного парсера: {e}")
+        return []
 
 def get_lesson_time(lesson_num, day_of_week):
     """Возвращает время начала и конца пары"""
