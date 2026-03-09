@@ -239,73 +239,83 @@ previous_schedule_hash = None
 
 def get_schedule_from_site(group_name):
     """
-    ВСТРОЕННОЕ РАСПИСАНИЕ - работает всегда, не зависит от сайта
+    Получает расписание с сайта колледжа через парсинг HTML
     """
-    print(f"\n{'='*50}")
-    print(f"🔍 ИЩУ РАСПИСАНИЕ для группы: {group_name}")
-    print(f"{'='*50}")
+    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+        'Connection': 'keep-alive',
+    }
     
-    # ------------------------------------------------------
-    # ВСТАВЛЯЙ СЮДА АКТУАЛЬНОЕ РАСПИСАНИЕ С САЙТА
-    # ------------------------------------------------------
-    all_schedule = [
-        # Группа 213
-        {'date': '07-март', 'group': '213', 'lesson_num': '1', 'subject': 'Адм-деликтное и проц-исполните', 'teacher': 'Парфилов А.А.', 'room': '307'},
-        {'date': '07-март', 'group': '213', 'lesson_num': '2', 'subject': 'Защита насел', 'teacher': 'Медведев М.П.', 'room': '202'},
-        
-        # Группа 301
-        {'date': '07-март', 'group': '301', 'lesson_num': '1', 'subject': 'Техника коммуник и осн команд', 'teacher': 'Чернякова С.Н.', 'room': '401'},
-        {'date': '07-март', 'group': '301', 'lesson_num': '2', 'subject': 'Прогр ср-ва созд инт прил', 'teacher': 'Кособуцкий А.В.', 'room': '303'},
-        {'date': '07-март', 'group': '301', 'lesson_num': '3', 'subject': 'ПО обработки граф инф', 'teacher': 'Кособуцкий А.В.', 'room': '303'},
-        
-        # Группа 471
-        {'date': '07-март', 'group': '471', 'lesson_num': '1', 'subject': 'Разраб прил. для моб. устр.', 'teacher': 'Зайко Д.В.', 'room': '303'},
-        
-        # Группа 483
-        {'date': '07-март', 'group': '483', 'lesson_num': '2', 'subject': 'Разраб прил. для моб. устр.', 'teacher': 'Зайко Д.В.', 'room': '405'},
-        
-        # Группа 292
-        {'date': '07-март', 'group': '292', 'lesson_num': '1', 'subject': 'Физиология питания', 'teacher': 'Беговская Е.Ю.', 'room': '407'},
-        {'date': '07-март', 'group': '292', 'lesson_num': '2', 'subject': 'Деловые коммуникации', 'teacher': 'Чернякова С.Н.', 'room': '312'},
-        
-        # Группа 295
-        {'date': '07-март', 'group': '295', 'lesson_num': '1', 'subject': 'Электротехн с осн электр', 'teacher': 'Самоховец С.В.', 'room': '301'},
-        
-        # Группа 296
-        {'date': '07-март', 'group': '296', 'lesson_num': '1', 'subject': 'Осн права', 'teacher': 'Медведев М.П.', 'room': '202'},
-        
-        # Группа 297
-        {'date': '07-март', 'group': '297', 'lesson_num': '1', 'subject': 'Охр окр среды и энергосб', 'teacher': 'Леванова Е.Б.', 'room': '304'},
-        
-        # Группа 298
-        {'date': '07-март', 'group': '298', 'lesson_num': '1', 'subject': 'Юридическая служба в организац', 'teacher': 'Мегель Т.А.', 'room': '312'},
-        
-        # Группа 110
-        {'date': '07-март', 'group': '110', 'lesson_num': '1', 'subject': 'Математика', 'teacher': 'Комар В.М.', 'room': '302'},
-        {'date': '07-март', 'group': '110', 'lesson_num': '2', 'subject': 'Ист Бел в конт всем ист', 'teacher': 'Шедь В.В.', 'room': '412'},
-        
-        # Группа 111
-        {'date': '07-март', 'group': '111', 'lesson_num': '1', 'subject': 'Ист Бел в конт всем ист', 'teacher': 'Шедь В.В.', 'room': '412'},
-        {'date': '07-март', 'group': '111', 'lesson_num': '2', 'subject': 'Математика', 'teacher': 'Комар В.М.', 'room': '302'},
-    ]
+    all_schedule_items = []
     
-    # Фильтруем по нужной группе
-    result = []
-    for item in all_schedule:
-        if item['group'] == group_name:
-            result.append({
-                'date': item['date'],
-                'lesson_num': item['lesson_num'],
-                'subject': item['subject'],
-                'teacher': item['teacher'],
-                'room': item['room']
-            })
-    
-    # Сортируем по дате и номеру пары
-    result.sort(key=lambda x: (x['date'], int(x['lesson_num']) if x['lesson_num'].isdigit() else 0))
-    
-    print(f"✅ Найдено {len(result)} занятий для группы {group_name}")
-    return result
+    try:
+        print(f"\n{'='*50}")
+        print(f"🔍 ПАРСИНГ САЙТА для группы: {group_name}")
+        print(f"{'='*50}")
+        
+        print(f"📡 Загружаю страницу...")
+        response = requests.get(url, headers=headers, timeout=15)
+        print(f"📊 Статус ответа: {response.status_code}")
+        
+        if response.status_code != 200:
+            print("❌ Ошибка загрузки страницы")
+            return []
+        
+        response.encoding = 'utf-8'
+        print(f"📏 Размер страницы: {len(response.text)} символов")
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Ищем таблицу с расписанием
+        table = soup.find('table', id='at_107')
+        if not table:
+            print("❌ Таблица с id='at_107' не найдена, ищу другую таблицу...")
+            table = soup.find('table', class_='display')
+            if not table:
+                print("❌ Таблица не найдена!")
+                return []
+        
+        print("✅ Таблица найдена")
+        
+        # Находим все строки с данными
+        rows = table.find_all('tr')
+        print(f"📊 Всего строк: {len(rows)}")
+        
+        if len(rows) <= 1:
+            print("❌ Нет данных в таблице")
+            return []
+        
+        # Парсим строки, пропуская заголовок
+        for row in rows[1:]:
+            cells = row.find_all('td')
+            if len(cells) >= 7:
+                date = cells[0].text.strip()
+                group = cells[1].text.strip()
+                lesson_num = cells[2].text.strip()
+                subject = cells[3].text.strip()
+                teacher = cells[4].text.strip()
+                room = cells[5].text.strip()
+                
+                if group == group_name:
+                    all_schedule_items.append({
+                        'date': date,
+                        'lesson_num': lesson_num,
+                        'subject': subject,
+                        'teacher': teacher,
+                        'room': room
+                    })
+        
+        print(f"✅ Найдено {len(all_schedule_items)} занятий для группы {group_name}")
+        return all_schedule_items
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
 def get_all_groups_schedule():
     """Получает расписание для нескольких групп, чтобы проверить изменения"""
