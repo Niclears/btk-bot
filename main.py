@@ -854,7 +854,7 @@ def show_schedule(message, period):
         print(f"📅 Сегодня (ищем): {today_str}")
         print(f"📅 Завтра (ищем): {tomorrow_str}")
         
-        # Определяем день недели
+        # Определяем день недели для сегодня
         today_weekday = now.weekday()
         
         if period == 'today':
@@ -917,8 +917,74 @@ def show_schedule(message, period):
             text = format_schedule_with_day(filtered_schedule, group, target_day, period_name)
             
         else:  # week
-            # Для недели показываем всё расписание
-            text = format_schedule_with_day(schedule, group, today_weekday, "НА БЛИЖАЙШИЕ ДНИ")
+            period_name = "НА БЛИЖАЙШИЕ ДНИ"
+            
+            # Для недели нужно определить день недели для КАЖДОЙ даты
+            # Создадим словарь соответствия дат и дней недели
+            date_weekday = {}
+            
+            # Парсим первую дату, чтобы понять начало
+            first_date = all_dates[0]
+            try:
+                # Пытаемся определить день недели для первой даты
+                # Это примерное определение, для точности нужно знать дату
+                # Но для демо будем считать, что первая дата - это сегодня или завтра
+                if first_date == today_str:
+                    first_weekday = today_weekday
+                elif first_date == tomorrow_str:
+                    first_weekday = (today_weekday + 1) % 7
+                else:
+                    # Если не сегодня и не завтра, используем today_weekday как начало
+                    first_weekday = today_weekday
+            except:
+                first_weekday = today_weekday
+            
+            # Заполняем словарь для всех дат
+            for i, date in enumerate(all_dates):
+                date_weekday[date] = (first_weekday + i) % 7
+            
+            # Группируем расписание по датам
+            dates_dict = {}
+            for item in schedule:
+                if item['date'] not in dates_dict:
+                    dates_dict[item['date']] = []
+                dates_dict[item['date']].append(item)
+            
+            # Форматируем вывод
+            text = f"📚 <b>РАСПИСАНИЕ {period_name}</b>\n"
+            text += f"👥 <b>Группа {group}</b>\n"
+            text += "══════════════════════\n"
+            
+            total_count = 0
+            days_ru = {
+                0: "ПОНЕДЕЛЬНИК", 1: "ВТОРНИК", 2: "СРЕДА", 3: "ЧЕТВЕРГ",
+                4: "ПЯТНИЦА", 5: "СУББОТА", 6: "ВОСКРЕСЕНЬЕ"
+            }
+            
+            for date in all_dates:
+                if date in dates_dict:
+                    text += f"\n📅 <b>{date}</b> <i>({days_ru[date_weekday[date]]})</i>\n"
+                    text += "──────────────────\n"
+                    
+                    # Сортируем по номеру пары
+                    sorted_items = sorted(dates_dict[date], key=lambda x: int(x['lesson_num']) if x['lesson_num'].isdigit() else 0)
+                    
+                    for item in sorted_items:
+                        total_count += 1
+                        text += f"<b>{item['lesson_num']} пара:</b>\n"
+                        text += f"📖 <b>{item['subject']}</b>\n"
+                        text += f"👨‍🏫 {item['teacher']}\n"
+                        text += f"🚪 Кабинет: {item['room']}\n"
+                        
+                        if item['lesson_num'].isdigit():
+                            lesson_time = get_lesson_time(int(item['lesson_num']), date_weekday[date])
+                            if lesson_time:
+                                text += f"⏱️ {lesson_time}\n"
+                        
+                        text += "\n"
+            
+            text += "══════════════════════\n"
+            text += f"📊 <b>Всего пар:</b> {total_count}"
         
         try:
             bot.edit_message_text(text, message.chat.id, msg.message_id, parse_mode='HTML')
@@ -938,7 +1004,6 @@ def show_schedule(message, period):
             msg.message_id,
             parse_mode='HTML'
         )
-
 # ---------- Запуск ----------
 if __name__ == "__main__":
     print("\n" + "="*50)
