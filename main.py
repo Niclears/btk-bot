@@ -238,112 +238,43 @@ previous_schedule_hash = None
 
 def get_schedule_from_site(group_name):
     """
-    Получает расписание с сайта колледжа с полными заголовками
+    ВСТРОЕННОЕ РАСПИСАНИЕ — только для группы 301
     """
-    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
+    print(f"\n{'='*50}")
+    print(f"🔍 ИЩУ РАСПИСАНИЕ для группы: {group_name}")
+    print(f"{'='*50}")
     
-    # Полные заголовки браузера
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'max-age=0',
-        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'Sec-Ch-Ua-Mobile': '?0',
-        'Sec-Ch-Ua-Platform': '"Windows"',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Upgrade-Insecure-Requests': '1',
-        'Cookie': 'language=ru-RU',  # Добавляем куку
-    }
+    # ------------------------------------------------------
+    # РАСПИСАНИЕ ДЛЯ ГРУППЫ 301
+    # ------------------------------------------------------
+    all_schedule = [
+        # 25 марта (вторник)
+        {'date': '25-март', 'group': '301', 'lesson_num': '1', 'subject': 'Техника коммуник и осн команд', 'teacher': 'Чернякова С.Н.', 'room': '302'},
+        {'date': '25-март', 'group': '301', 'lesson_num': '2', 'subject': 'ПО обработки граф инф', 'teacher': 'Кособуцкий А.В.', 'room': '303'},
+        {'date': '25-март', 'group': '301', 'lesson_num': '3', 'subject': 'СУБД', 'teacher': 'Зинькович Н.А.', 'room': 'О47'},
+        {'date': '25-март', 'group': '301', 'lesson_num': '4', 'subject': 'Защита комп информации', 'teacher': 'Соловей Е.В.', 'room': 'О37'},
+        
+        # 26 марта (среда)
+        {'date': '26-март', 'group': '301', 'lesson_num': '1', 'subject': 'Техника коммуник и осн команд', 'teacher': 'Чернякова С.Н.', 'room': '302'},
+        {'date': '26-март', 'group': '301', 'lesson_num': '2', 'subject': 'Физ культура и здоровье', 'teacher': 'Семченко А.Д.', 'room': 'СЗрез3'},
+        {'date': '26-март', 'group': '301', 'lesson_num': '3', 'subject': 'СУБД', 'teacher': 'Зинькович Н.А.', 'room': 'О47'},
+    ]
     
-    # Создаём сессию с куками
-    session = requests.Session()
-    session.headers.update(headers)
+    # Фильтруем по нужной группе
+    result = []
+    for item in all_schedule:
+        if item['group'] == group_name:
+            result.append({
+                'date': item['date'],
+                'lesson_num': item['lesson_num'],
+                'subject': item['subject'],
+                'teacher': item['teacher'],
+                'room': item['room']
+            })
     
-    all_schedule_items = []
-    
-    try:
-        print(f"\n{'='*50}")
-        print(f"🔍 ПАРСИНГ САЙТА для группы: {group_name}")
-        print(f"{'='*50}")
-        
-        print(f"📡 Загружаю страницу...")
-        response = session.get(url, timeout=15)
-        print(f"📊 Статус ответа: {response.status_code}")
-        
-        if response.status_code != 200:
-            print(f"❌ Ошибка загрузки страницы: {response.status_code}")
-            return []
-        
-        response.encoding = 'utf-8'
-        print(f"📏 Размер страницы: {len(response.text)} символов")
-        
-        # Сохраняем HTML для отладки (первые 2000 символов)
-        print(f"📄 Начало страницы:\n{response.text[:2000]}")
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Ищем таблицу с id='at_107'
-        table = soup.find('table', id='at_107')
-        if not table:
-            print("❌ Таблица с id='at_107' не найдена")
-            # Пробуем найти любую таблицу
-            tables = soup.find_all('table')
-            print(f"🔍 Найдено таблиц: {len(tables)}")
-            if tables:
-                print(f"📊 Первая таблица: {tables[0].get('id', 'без id')}")
-                table = tables[0]
-            else:
-                return []
-        
-        print("✅ Таблица найдена")
-        
-        rows = table.find_all('tr')
-        print(f"📊 Всего строк в таблице: {len(rows)}")
-        
-        if len(rows) <= 1:
-            print("❌ Нет данных в таблице")
-            return []
-        
-        # Парсим строки
-        for row in rows[1:]:
-            cells = row.find_all('td')
-            if len(cells) >= 7:
-                date = cells[0].text.strip()
-                group = cells[1].text.strip()
-                lesson_num = cells[2].text.strip()
-                subject = cells[3].text.strip()
-                teacher = cells[4].text.strip()
-                room = cells[5].text.strip()
-                
-                print(f"📋 Строка: {date} | {group} | {lesson_num} | {subject[:30]}...")
-                
-                if group == group_name:
-                    all_schedule_items.append({
-                        'date': date,
-                        'lesson_num': lesson_num,
-                        'subject': subject,
-                        'teacher': teacher,
-                        'room': room
-                    })
-        
-        print(f"✅ Найдено {len(all_schedule_items)} занятий для группы {group_name}")
-        return all_schedule_items
-        
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Ошибка запроса: {e}")
-        return []
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
-
+    result.sort(key=lambda x: (x['date'], int(x['lesson_num']) if x['lesson_num'].isdigit() else 0))
+    print(f"✅ Найдено {len(result)} занятий для группы {group_name}")
+    return result
 def get_all_groups_schedule():
     """Получает расписание для нескольких групп, чтобы проверить изменения"""
     all_schedule = []
