@@ -238,61 +238,80 @@ previous_schedule_hash = None
 
 def get_schedule_from_site(group_name):
     """
-    Получает расписание через AJAX-запрос (AriDataTables)
+    Получает расписание с сайта колледжа с полными заголовками
     """
-    url = "https://www.bartc.by/index.php"
-    params = {
-        'option': 'com_ajax',
-        'module': 'aridatatables',
-        'method': 'getData',
-        'dataId': '107',  # ID таблицы at_107
-        'format': 'json'
+    url = "https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie"
+    
+    # Полные заголовки браузера
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'max-age=0',
+        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+        'Cookie': 'language=ru-RU',  # Добавляем куку
     }
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Referer': 'https://www.bartc.by/index.php/ru/obuchayushchemusya/dnevnoe-otdelenie/tekushchee-raspisanie',
-        'Connection': 'keep-alive',
-    }
+    # Создаём сессию с куками
+    session = requests.Session()
+    session.headers.update(headers)
     
     all_schedule_items = []
     
     try:
         print(f"\n{'='*50}")
-        print(f"🔍 ПАРСИНГ AJAX для группы: {group_name}")
+        print(f"🔍 ПАРСИНГ САЙТА для группы: {group_name}")
         print(f"{'='*50}")
         
-        print(f"📡 Запрос к API: {url}")
-        response = requests.get(url, params=params, headers=headers, timeout=15)
+        print(f"📡 Загружаю страницу...")
+        response = session.get(url, timeout=15)
         print(f"📊 Статус ответа: {response.status_code}")
         
         if response.status_code != 200:
-            print(f"❌ Ошибка API: {response.status_code}")
+            print(f"❌ Ошибка загрузки страницы: {response.status_code}")
             return []
         
-        data = response.json()
-        print(f"✅ Получены данные от API")
+        response.encoding = 'utf-8'
+        print(f"📏 Размер страницы: {len(response.text)} символов")
         
-        # В ответе приходит HTML-таблица
-        html_content = data.get('data', '')
-        if not html_content:
-            print("❌ Нет данных в ответе")
-            return []
+        # Сохраняем HTML для отладки (первые 2000 символов)
+        print(f"📄 Начало страницы:\n{response.text[:2000]}")
         
-        # Парсим HTML таблицу
-        soup = BeautifulSoup(html_content, 'html.parser')
-        table = soup.find('table')
+        soup = BeautifulSoup(response.text, 'html.parser')
         
+        # Ищем таблицу с id='at_107'
+        table = soup.find('table', id='at_107')
         if not table:
-            print("❌ Таблица не найдена в ответе")
+            print("❌ Таблица с id='at_107' не найдена")
+            # Пробуем найти любую таблицу
+            tables = soup.find_all('table')
+            print(f"🔍 Найдено таблиц: {len(tables)}")
+            if tables:
+                print(f"📊 Первая таблица: {tables[0].get('id', 'без id')}")
+                table = tables[0]
+            else:
+                return []
+        
+        print("✅ Таблица найдена")
+        
+        rows = table.find_all('tr')
+        print(f"📊 Всего строк в таблице: {len(rows)}")
+        
+        if len(rows) <= 1:
+            print("❌ Нет данных в таблице")
             return []
         
-        rows = table.find_all('tr')[1:]  # пропускаем заголовок
-        print(f"📊 Найдено строк: {len(rows)}")
-        
-        for row in rows:
+        # Парсим строки
+        for row in rows[1:]:
             cells = row.find_all('td')
             if len(cells) >= 7:
                 date = cells[0].text.strip()
@@ -301,6 +320,8 @@ def get_schedule_from_site(group_name):
                 subject = cells[3].text.strip()
                 teacher = cells[4].text.strip()
                 room = cells[5].text.strip()
+                
+                print(f"📋 Строка: {date} | {group} | {lesson_num} | {subject[:30]}...")
                 
                 if group == group_name:
                     all_schedule_items.append({
@@ -314,6 +335,9 @@ def get_schedule_from_site(group_name):
         print(f"✅ Найдено {len(all_schedule_items)} занятий для группы {group_name}")
         return all_schedule_items
         
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Ошибка запроса: {e}")
+        return []
     except Exception as e:
         print(f"❌ Ошибка: {e}")
         import traceback
